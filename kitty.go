@@ -50,13 +50,6 @@ func (p painter) image(id uint32, png []byte, cols, rows int) string {
 	return p.layer(id, png, cols, rows, 0)
 }
 
-// under shows a PNG like image does, but beneath the text in its cells, so
-// text can be written on it. tmux cannot show text over an image, so it is
-// not for use there.
-func (p painter) under(id uint32, png []byte, cols, rows int) string {
-	return p.layer(id, png, cols, rows, -1)
-}
-
 // part shows a PNG at its own size at the cursor, x and y pixels into the
 // cursor's cell, over the page. It is for partial page pictures, which tmux
 // cannot show, since its cells show whole images.
