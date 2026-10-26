@@ -1,0 +1,155 @@
+// Drawing images with the kitty graphics protocol, which kitty, Ghostty, and
+// WezTerm support. Outside tmux, an image is placed at the cursor. tmux does
+// not know about images, so inside it the image is placed virtually and shown
+// through Unicode placeholder cells, which tmux keeps and redraws like text,
+// and every escape sequence is wrapped in tmux passthrough.
+package main
+
+import (
+	"encoding/base64"
+	"fmt"
+	"os"
+	"strings"
+)
+
+const kittyChunk = 4096 // the protocol caps each escape sequence's payload at 4096 bytes
+
+// pageImage is the id of the image showing the page, so each frame replaces
+// the last; the bar's icons follow it. Ids start from the process id, so
+// viewers in one terminal, such as two tmux panes, keep their own images.
+// Inside tmux an id is also its placeholder cells' color.
+var pageImage = uint32(os.Getpid()&0xffff)<<8 + 1
+
+// painter writes images for one terminal.
+type painter struct {
+	tmux bool
+	// files means the terminal reads images from files, so frames skip the
+	// terminal's input. It needs the terminal on this machine, so not over SSH.
+	files bool
+}
+
+// wrap passes seq through tmux to the terminal outside it.
+func (p painter) wrap(seq string) string {
+	if !p.tmux {
+		return seq
+	}
+	return "\x1bPtmux;" + strings.ReplaceAll(seq, "\x1b", "\x1b\x1b") + "\x1b\\"
+}
+
+// image returns the escape sequences that show a PNG as image id across
+// cols x rows cells: at the cursor outside tmux, or where its placeholders are
+// inside it.
+func (p painter) image(id uint32, png []byte, cols, rows int) string {
+	return p.layer(id, png, cols, rows, 0)
+}
+
+// under shows a PNG like image does, but beneath the text in its cells, so
+// text can be written on it. tmux cannot show text over an image, so it is
+// not for use there.
+func (p painter) under(id uint32, png []byte, cols, rows int) string {
+	return p.layer(id, png, cols, rows, -1)
+}
+
+// layer shows a PNG at layer z: above the text from 0, beneath it below 0.
+func (p painter) layer(id uint32, png []byte, cols, rows, z int) string {
+	place := fmt.Sprintf("i=%d,p=1,C=1,z=%d,c=%d,r=%d", id, z, cols, rows)
+	if p.tmux {
+		place = fmt.Sprintf("i=%d,U=1,c=%d,r=%d", id, cols, rows)
+	}
+	if p.files {
+		if path, err := tempImage(png); err == nil {
+			path64 := base64.StdEncoding.EncodeToString([]byte(path))
+			return p.wrap(fmt.Sprintf("\x1b_Ga=T,f=100,t=t,%s,q=2;%s\x1b\\", place, path64))
+		}
+	}
+	payload := base64.StdEncoding.EncodeToString(png)
+	var b strings.Builder
+	for start := 0; start < len(payload); start += kittyChunk {
+		end := min(start+kittyChunk, len(payload))
+		more := 0
+		if end < len(payload) {
+			more = 1
+		}
+		head := fmt.Sprintf("m=%d", more)
+		if start == 0 {
+			head = fmt.Sprintf("a=T,f=100,%s,q=2,m=%d", place, more)
+		}
+		b.WriteString(p.wrap("\x1b_G" + head + ";" + payload[start:end] + "\x1b\\"))
+	}
+	return b.String()
+}
+
+// remove deletes image id.
+func (p painter) remove(id uint32) string {
+	return p.wrap(fmt.Sprintf("\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", id))
+}
+
+// tempImage writes png where the terminal may read and then delete it: the
+// protocol only deletes files in a temp directory whose name says
+// tty-graphics-protocol.
+func tempImage(png []byte) (string, error) {
+	dir := os.TempDir()
+	if info, err := os.Stat("/dev/shm"); err == nil && info.IsDir() {
+		dir = "/dev/shm"
+	}
+	f, err := os.CreateTemp(dir, "tty-graphics-protocol-browse-*.png")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.Write(png); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// placeholders returns the cells that show image id inside tmux, cols x rows
+// of them from row top and column left. Each cell is U+10EEEE with diacritics
+// for its row and column, colored with the image id.
+func placeholders(id uint32, top, left, cols, rows int) string {
+	cols = min(cols, len(rowColumnDiacritics))
+	rows = min(rows, len(rowColumnDiacritics))
+	var b strings.Builder
+	fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm", id>>16&0xff, id>>8&0xff, id&0xff)
+	for row := range rows {
+		fmt.Fprintf(&b, "\x1b[%d;%dH", top+row, left)
+		for col := range cols {
+			b.WriteRune(0x10EEEE)
+			b.WriteRune(rowColumnDiacritics[row])
+			b.WriteRune(rowColumnDiacritics[col])
+		}
+	}
+	b.WriteString("\x1b[39m")
+	return b.String()
+}
+
+// rowColumnDiacritics encode row and column numbers on placeholder cells, from
+// https://sw.kovidgoyal.net/kitty/_downloads/f0a0de9ec8d9ff4456206db8e0814937/rowcolumn-diacritics.txt
+var rowColumnDiacritics = []rune{
+	0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F, 0x0346, 0x034A, 0x034B, 0x034C,
+	0x0350, 0x0351, 0x0352, 0x0357, 0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369,
+	0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F, 0x0483, 0x0484, 0x0485, 0x0486, 0x0487, 0x0592,
+	0x0593, 0x0594, 0x0595, 0x0597, 0x0598, 0x0599, 0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1,
+	0x05A8, 0x05A9, 0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611, 0x0612, 0x0613, 0x0614, 0x0615,
+	0x0616, 0x0617, 0x0657, 0x0658, 0x0659, 0x065A, 0x065B, 0x065D, 0x065E, 0x06D6, 0x06D7, 0x06D8,
+	0x06D9, 0x06DA, 0x06DB, 0x06DC, 0x06DF, 0x06E0, 0x06E1, 0x06E2, 0x06E4, 0x06E7, 0x06E8, 0x06EB,
+	0x06EC, 0x0730, 0x0732, 0x0733, 0x0735, 0x0736, 0x073A, 0x073D, 0x073F, 0x0740, 0x0741, 0x0743,
+	0x0745, 0x0747, 0x0749, 0x074A, 0x07EB, 0x07EC, 0x07ED, 0x07EE, 0x07EF, 0x07F0, 0x07F1, 0x07F3,
+	0x0816, 0x0817, 0x0818, 0x0819, 0x081B, 0x081C, 0x081D, 0x081E, 0x081F, 0x0820, 0x0821, 0x0822,
+	0x0823, 0x0825, 0x0826, 0x0827, 0x0829, 0x082A, 0x082B, 0x082C, 0x082D, 0x0951, 0x0953, 0x0954,
+	0x0F82, 0x0F83, 0x0F86, 0x0F87, 0x135D, 0x135E, 0x135F, 0x17DD, 0x193A, 0x1A17, 0x1A75, 0x1A76,
+	0x1A77, 0x1A78, 0x1A79, 0x1A7A, 0x1A7B, 0x1A7C, 0x1B6B, 0x1B6D, 0x1B6E, 0x1B6F, 0x1B70, 0x1B71,
+	0x1B72, 0x1B73, 0x1CD0, 0x1CD1, 0x1CD2, 0x1CDA, 0x1CDB, 0x1CE0, 0x1DC0, 0x1DC1, 0x1DC3, 0x1DC4,
+	0x1DC5, 0x1DC6, 0x1DC7, 0x1DC8, 0x1DC9, 0x1DCB, 0x1DCC, 0x1DD1, 0x1DD2, 0x1DD3, 0x1DD4, 0x1DD5,
+	0x1DD6, 0x1DD7, 0x1DD8, 0x1DD9, 0x1DDA, 0x1DDB, 0x1DDC, 0x1DDD, 0x1DDE, 0x1DDF, 0x1DE0, 0x1DE1,
+	0x1DE2, 0x1DE3, 0x1DE4, 0x1DE5, 0x1DE6, 0x1DFE, 0x20D0, 0x20D1, 0x20D4, 0x20D5, 0x20D6, 0x20D7,
+	0x20DB, 0x20DC, 0x20E1, 0x20E7, 0x20E9, 0x20F0, 0x2CEF, 0x2CF0, 0x2CF1, 0x2DE0, 0x2DE1, 0x2DE2,
+	0x2DE3, 0x2DE4, 0x2DE5, 0x2DE6, 0x2DE7, 0x2DE8, 0x2DE9, 0x2DEA, 0x2DEB, 0x2DEC, 0x2DED, 0x2DEE,
+	0x2DEF, 0x2DF0, 0x2DF1, 0x2DF2, 0x2DF3, 0x2DF4, 0x2DF5, 0x2DF6, 0x2DF7, 0x2DF8, 0x2DF9, 0x2DFA,
+	0x2DFB, 0x2DFC, 0x2DFD, 0x2DFE, 0x2DFF, 0xA66F, 0xA67C, 0xA67D, 0xA6F0, 0xA6F1, 0xA8E0, 0xA8E1,
+	0xA8E2, 0xA8E3, 0xA8E4, 0xA8E5, 0xA8E6, 0xA8E7, 0xA8E8, 0xA8E9, 0xA8EA, 0xA8EB, 0xA8EC, 0xA8ED,
+	0xA8EE, 0xA8EF, 0xA8F0, 0xA8F1, 0xAAB0, 0xAAB2, 0xAAB3, 0xAAB7, 0xAAB8, 0xAABE, 0xAABF, 0xAAC1,
+	0xFE20, 0xFE21, 0xFE22, 0xFE23, 0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187,
+	0x1D188, 0x1D189, 0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243, 0x1D244,
+}
