@@ -42,12 +42,13 @@ type layout struct {
 	cols, rows   int
 	cellW, cellH float64 // device pixels per cell
 	scale        float64 // device pixels per CSS pixel
+	tmux         bool    // inside tmux, whose cells show whole images only
 }
 
 // view describes the terminal to the daemon.
 func (l layout) view(c caps, remote bool) View {
 	hex := func(c color.NRGBA) string { return fmt.Sprintf("#%02x%02x%02x", c.R, c.G, c.B) }
-	return View{Cols: l.cols, Rows: l.rows, CellW: l.cellW, CellH: l.cellH, Scale: l.scale, FG: hex(c.fg), BG: hex(c.bg), Remote: remote}
+	return View{Cols: l.cols, Rows: l.rows, CellW: l.cellW, CellH: l.cellH, Scale: l.scale, FG: hex(c.fg), BG: hex(c.bg), Remote: remote, Parts: !l.tmux}
 }
 
 // at turns a mouse position into CSS pixels on the screen. Terminals report
@@ -222,6 +223,7 @@ type viewer struct {
 	clicks    int
 	lastMove  time.Time
 	cells     string // the placeholder grid last drawn inside tmux
+	parts     int    // partial page pictures placed since the last whole one
 }
 
 // do sends a command for the person, in the background, so the screen keeps
@@ -297,6 +299,7 @@ func runViewer() error {
 		if err != nil {
 			return err
 		}
+		v.lay.tmux = inTmux
 		v.st, err = openStream(v.lay.view(v.caps, remote))
 		if err != nil {
 			return err
@@ -352,8 +355,19 @@ func (v *viewer) draw(f Frame) string {
 	showBox := f.Editing || f.Start
 	switch f.Layer {
 	case "page":
-		if !f.Start {
+		switch {
+		case f.Start:
+		case f.Partial && !v.p.tmux:
+			// Over the page, in the cell the offset falls in, the rest of the
+			// offset within it. A partial picture is in device pixels.
+			col, row := int(float64(f.X)/v.lay.cellW), int(float64(f.Y)/v.lay.cellH)
+			id := partImage + uint32(v.parts%partCount)
+			v.parts++
+			out = fmt.Sprintf("\x1b[%d;%dH", barRows+1+row, col+1) +
+				v.p.part(id, f.PNG, f.X-int(float64(col)*v.lay.cellW), f.Y-int(float64(row)*v.lay.cellH))
+		default:
 			out = fmt.Sprintf("\x1b[%d;1H", barRows+1) + v.p.layer(pageImage, f.PNG, v.lay.cols, v.lay.rows-barRows, 0)
+			out += v.clearParts()
 		}
 	case "bar":
 		out = "\x1b[1;1H" + v.p.layer(barImage, f.PNG, v.lay.cols, barRows, 1)
@@ -363,7 +377,7 @@ func (v *viewer) draw(f Frame) string {
 		}
 	}
 	if f.Start && !v.onStart {
-		out += v.p.remove(pageImage) // the last page's picture goes
+		out += v.p.remove(pageImage) + v.clearParts() // the last page's picture goes
 	}
 	if !showBox && v.boxShown {
 		out += v.p.remove(boxImage)
@@ -375,6 +389,16 @@ func (v *viewer) draw(f Frame) string {
 			out += cells
 		}
 	}
+	return out
+}
+
+// clearParts removes the partial page pictures placed since the last whole one.
+func (v *viewer) clearParts() string {
+	var out string
+	for i := range min(v.parts, partCount) {
+		out += v.p.remove(partImage + uint32(i))
+	}
+	v.parts = 0
 	return out
 }
 

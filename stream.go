@@ -31,7 +31,8 @@ const (
 
 // View is the terminal a viewer draws into: its size in cells, a cell's size
 // in device pixels, the device pixels per CSS pixel to render at, its colors,
-// and whether frames cross a network, which asks for fewer of them.
+// whether frames cross a network, which asks for fewer of them, and whether
+// the viewer can place partial page pictures, which tmux cannot.
 type View struct {
 	Cols   int     `json:"cols"`
 	Rows   int     `json:"rows"`
@@ -41,6 +42,7 @@ type View struct {
 	FG     string  `json:"fg"`
 	BG     string  `json:"bg"`
 	Remote bool    `json:"remote,omitempty"`
+	Parts  bool    `json:"parts,omitempty"`
 }
 
 // screen is the whole terminal in CSS pixels, which the interface fills.
@@ -92,13 +94,18 @@ func (v View) dark() bool {
 }
 
 // Frame is one update for a viewer. A frame with a PNG is a picture of one
-// Layer: "page", "bar", or "box". Every frame carries the state the viewer
-// routes by: the active tab (none means every tab is closed), whether the
-// box holds the keyboard, and whether the tab is blank, which shows the
+// Layer: "page", "bar", or "box". A page picture with Partial set is only
+// the part of the page that changed, to be placed X, Y device pixels from
+// the page's top left over what is there. Every frame carries the state the
+// viewer routes by: the active tab (none means every tab is closed), whether
+// the box holds the keyboard, and whether the tab is blank, which shows the
 // start screen: the box over nothing.
 type Frame struct {
 	Layer   string `json:"layer,omitempty"`
 	PNG     []byte `json:"png,omitempty"`
+	Partial bool   `json:"partial,omitempty"`
+	X       int    `json:"x,omitempty"`
+	Y       int    `json:"y,omitempty"`
 	Tab     string `json:"tab"`
 	Editing bool   `json:"editing"`
 	Start   bool   `json:"start"`
@@ -158,7 +165,11 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error,
 		note     string
 		noteAt   time.Time
 		box      *iface
+		pageDiff *differ // across a network, only what changed goes
 	)
+	if view.Remote && view.Parts {
+		pageDiff = &differ{}
+	}
 	defer func() { stopPage() }()
 
 	// The interface asks the session for things on the person's behalf.
@@ -239,6 +250,9 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error,
 			}
 			shown = t
 			stopPage = t.show(view, pngs["page"])
+			if pageDiff != nil {
+				pageDiff.last = nil
+			}
 		}
 
 		st, start := s.uiState(t)
@@ -257,6 +271,14 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error,
 			return nil
 		case png := <-pngs["page"]:
 			f.Layer, f.PNG = "page", pace(pngs["page"], png, sent, "page", gap)
+			if pageDiff != nil {
+				var full bool
+				f.PNG, f.X, f.Y, full = pageDiff.next(f.PNG)
+				f.Partial = !full
+				if f.PNG == nil {
+					continue
+				}
+			}
 		case png := <-pngs["bar"]:
 			f.Layer, f.PNG = "bar", pace(pngs["bar"], png, sent, "bar", uiGap)
 		case png := <-pngs["box"]:

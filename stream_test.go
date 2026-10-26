@@ -337,3 +337,34 @@ func TestBoxClosesWhenTabChanges(t *testing.T) {
 		}
 	}
 }
+
+// Across a network, a small change to the page goes as just its region.
+func TestRemoteStreamSendsPartials(t *testing.T) {
+	s, _ := newTestSession(t, map[string]string{"/": `<body style="margin:0;background:#fff">
+		<input autofocus style="position:absolute;left:100px;top:50px;width:120px;height:30px;font:20px monospace">`})
+	remote := testView
+	remote.Remote, remote.Parts = true, true
+	frames, inputs := startStream(t, s, remote)
+	first := nextFrame(t, frames, "page")
+	if first.Partial {
+		t.Fatal("the first picture should be whole")
+	}
+
+	inputs <- Input{Kind: "key", Key: "a"}
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case f := <-frames:
+			if f.Layer != "page" || !f.Partial {
+				continue
+			}
+			w, h := pngSize(f.PNG)
+			if f.X < 90 || f.X > 240 || f.Y < 40 || f.Y > 90 || w > 140 || h > 50 {
+				t.Errorf("partial picture at %d,%d is %dx%d, want around the input", f.X, f.Y, w, h)
+			}
+			return
+		case <-timeout:
+			t.Fatal("no partial picture after typing into the page")
+		}
+	}
+}

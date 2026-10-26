@@ -22,7 +22,10 @@ var (
 	pageImage = uint32(os.Getpid()&0xffff)<<8 + 1
 	barImage  = pageImage + 1
 	boxImage  = pageImage + 2
+	partImage = pageImage + 3 // the first of partCount ids for partial page pictures
 )
+
+const partCount = 64
 
 // painter writes images for one terminal.
 type painter struct {
@@ -54,9 +57,24 @@ func (p painter) under(id uint32, png []byte, cols, rows int) string {
 	return p.layer(id, png, cols, rows, -1)
 }
 
-// layer shows a PNG at layer z: above the text from 0, beneath it below 0.
-func (p painter) layer(id uint32, png []byte, cols, rows, z int) string {
-	place := fmt.Sprintf("i=%d,p=1,C=1,z=%d,c=%d,r=%d", id, z, cols, rows)
+// part shows a PNG at its own size at the cursor, x and y pixels into the
+// cursor's cell, over the page. It is for partial page pictures, which tmux
+// cannot show, since its cells show whole images.
+func (p painter) part(id uint32, png []byte, x, y int) string {
+	return p.layer(id, png, 0, 0, 0, fmt.Sprintf("X=%d,Y=%d", x, y))
+}
+
+// layer shows a PNG at layer z, above the text from 0, scaled across cols x
+// rows cells, or at its own size when they are 0. extra is more placement
+// keys.
+func (p painter) layer(id uint32, png []byte, cols, rows, z int, extra ...string) string {
+	place := fmt.Sprintf("i=%d,p=1,C=1,z=%d", id, z)
+	if cols > 0 {
+		place += fmt.Sprintf(",c=%d,r=%d", cols, rows)
+	}
+	for _, e := range extra {
+		place += "," + e
+	}
 	if p.tmux {
 		place = fmt.Sprintf("i=%d,U=1,c=%d,r=%d", id, cols, rows)
 	}
