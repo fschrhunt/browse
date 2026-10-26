@@ -1,0 +1,157 @@
+<!doctype html>
+<!--
+The interface: the bar and the address box, drawn by Chrome in two hidden
+tabs, each sized to its part, and shown by the viewer over the page. The
+daemon calls ui.update(state) with what to show, ui.edit(text) to open the
+box, and ui.leave() when the mouse leaves the bar; the page answers through
+the browse(message) binding with what the person did. Everything else, the
+mouse and keys, arrives as real input events from the viewer. Colors come
+from the terminal's theme, so the interface fits light and dark alike.
+-->
+<meta charset="utf-8">
+<style>
+  :root {
+    --fg: #e6e6e6;
+    --bg: #000000;
+    --accent: #f97316;
+    --blue: #3b82f6;
+    --sans: -apple-system, system-ui, "Segoe UI", Roboto, "Helvetica Neue", "DejaVu Sans", sans-serif;
+    --mono: ui-monospace, Menlo, "SF Mono", "DejaVu Sans Mono", monospace;
+    --pill: color-mix(in srgb, var(--fg) 14%, var(--bg));
+    --hover: color-mix(in srgb, var(--fg) 9%, var(--bg));
+    --line: color-mix(in srgb, var(--fg) 24%, var(--bg));
+    --dim: color-mix(in srgb, var(--fg) 45%, var(--bg));
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body { background: transparent; color: var(--fg); font: 13px/1 var(--sans); user-select: none; cursor: default; }
+  .bar, .box { display: none; }
+  body[data-part=bar] .bar, body[data-part=box] .box { display: block; }
+
+  /* The bar fills its tab but for the last pixel row, which stays clear so a
+     mouse move there, sent when the mouse leaves the bar, ends every hover. */
+  .bar { position: absolute; left: 0; top: 0; right: 0; height: calc(100% - 1px); background: var(--bg); }
+  .nav { position: absolute; left: 10px; top: 0; height: 100%; display: flex; align-items: center; gap: 2px; }
+  .btn { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; color: var(--fg); }
+  .btn svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .btn.off { color: var(--dim); }
+  .btn:not(.off):hover { background: var(--hover); }
+  .tabs { position: absolute; left: 50%; top: 0; height: 100%; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; }
+  .tab { height: 28px; padding: 0 13px; border-radius: 9px; display: flex; align-items: center; gap: 7px; white-space: nowrap; max-width: 220px; }
+  .tab span { overflow: hidden; text-overflow: ellipsis; }
+  .tab.active { background: var(--pill); }
+  .tab:not(.active):hover { background: var(--hover); }
+  .tab .x { display: none; width: 14px; height: 14px; margin-left: -4px; border-radius: 4px; place-items: center; color: var(--dim); font-size: 12px; }
+  .tab:hover .x { display: grid; }
+  .tab .x:hover { color: var(--fg); background: var(--line); }
+  .plus { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; opacity: 0; transition: opacity .12s; font-size: 18px; color: var(--fg); }
+  .bar:hover .plus { opacity: 1; }
+  .plus:hover { background: var(--hover); }
+  .sign { position: absolute; right: 14px; top: 0; height: 100%; display: none; align-items: center; color: var(--accent); font-size: 12px; }
+  body.agent .sign { display: flex; }
+  .note { position: absolute; left: 0; right: 0; bottom: 5px; text-align: center; color: var(--accent); font-size: 12px; pointer-events: none; }
+  .load { position: absolute; left: 0; bottom: 0; height: 2px; width: 25%; background: var(--blue); display: none; animation: slide 1.4s steps(24) infinite; }
+  body.loading .load { display: block; }
+  @keyframes slide { from { left: -25% } to { left: 100% } }
+
+  /* The box fills its tab: a rounded rectangle with the page showing past its corners. */
+  .box { position: absolute; inset: 0; border-radius: 12px; box-sizing: border-box; padding: 0 16px;
+         background: color-mix(in srgb, var(--fg) 8%, var(--bg)); border: 1px solid var(--line); }
+  body[data-part=box] .box { display: flex; align-items: center; }
+  .box input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; padding: 0; color: var(--fg);
+               font: 15px var(--mono); caret-color: var(--fg); }
+  .box input::placeholder { color: var(--dim); }
+  .box input::selection { background: color-mix(in srgb, var(--blue) 45%, transparent); }
+</style>
+
+<div class="bar">
+  <div class="nav">
+    <div class="btn off" data-do="back" title="Back"><svg viewBox="0 0 24 24"><path d="M19 12H5"/><path d="M11 6L5 12L11 18"/></svg></div>
+    <div class="btn off" data-do="forward" title="Forward"><svg viewBox="0 0 24 24"><path d="M5 12H19"/><path d="M13 6L19 12L13 18"/></svg></div>
+    <div class="btn" data-do="reload" title="Reload"><svg class="reload" viewBox="0 0 24 24"><path d="M19 12C19 15.866 15.866 19 12 19C8.134 19 5 15.866 5 12C5 8.134 8.134 5 12 5C13.8565 5 15.637 5.7376 16.9497 7.0503L19 9"/><path d="M19 4.5V9H14.5"/></svg><svg class="stop" viewBox="0 0 24 24" style="display:none"><path d="M7 7L17 17"/><path d="M17 7L7 17"/></svg></div>
+  </div>
+  <div class="tabs"></div>
+  <div class="sign">● agent</div>
+  <div class="note"></div>
+  <div class="load"></div>
+</div>
+<div class="box"><input placeholder="Search or enter address" spellcheck="false" autocomplete="off"></div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const send = m => window.browse && browse(JSON.stringify(m));
+let state = { tabs: [], back: false, forward: false, loading: false, agent: false, note: '' };
+
+// ui.update draws the state the daemon sends. part, "bar" or "box", says
+// which part this tab is.
+function update(next) {
+  state = { ...state, ...next };
+  if (next.theme) {
+    document.documentElement.style.setProperty('--fg', next.theme.fg);
+    document.documentElement.style.setProperty('--bg', next.theme.bg);
+  }
+  if (next.part) document.body.dataset.part = next.part;
+  const tabs = $('.tabs');
+  tabs.replaceChildren(...state.tabs.map(t => {
+    const el = document.createElement('div');
+    el.className = 'tab' + (t.active ? ' active' : '');
+    el.dataset.tab = t.id;
+    const x = document.createElement('div');
+    x.className = 'x'; x.textContent = '×'; x.dataset.close = t.id;
+    const label = document.createElement('span');
+    label.textContent = t.label;
+    el.append(x, label);
+    return el;
+  }));
+  const plus = document.createElement('div');
+  plus.className = 'plus'; plus.textContent = '+'; plus.dataset.do = 'new';
+  tabs.append(plus);
+  $('[data-do=back]').classList.toggle('off', !state.back);
+  $('[data-do=forward]').classList.toggle('off', !state.forward);
+  $('.reload').style.display = state.loading ? 'none' : '';
+  $('.stop').style.display = state.loading ? '' : 'none';
+  $('.note').textContent = state.note || '';
+  document.body.classList.toggle('loading', state.loading);
+  document.body.classList.toggle('agent', state.agent);
+}
+
+// ui.edit puts text in the box, selected, and takes the keyboard.
+function edit(text) {
+  const input = $('.box input');
+  input.value = text;
+  input.focus();
+  input.select();
+  send({ t: 'editing', on: true });
+}
+
+// ui.blur gives the keyboard up.
+function blur() {
+  $('.box input').blur();
+  send({ t: 'editing', on: false });
+}
+
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-close], [data-tab], [data-do]');
+  if (!t) return;
+  if (t.dataset.close) return send({ t: 'close', tab: t.dataset.close });
+  if (t.dataset.tab) {
+    const tab = state.tabs.find(x => x.id === t.dataset.tab);
+    return send(tab.active ? { t: 'edit' } : { t: 'switch', tab: tab.id });
+  }
+  if (t.classList.contains('off')) return;
+  const act = t.dataset.do === 'reload' && state.loading ? 'stop' : t.dataset.do;
+  send({ t: act });
+});
+
+$('.box input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const text = e.target.value.trim();
+    if (text) send({ t: 'go', url: text });
+    blur();
+  } else if (e.key === 'Escape') {
+    blur();
+  }
+});
+
+window.ui = { update, edit, blur };
+</script>

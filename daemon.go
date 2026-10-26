@@ -182,10 +182,10 @@ func serveDaemon(chromePath, profile string) error {
 }
 
 // handle serves one connection and reports whether the daemon should stop.
-// A stream request keeps the connection, writing one frame per line, until the
-// viewer hangs up. Once browse has been updated, every request is answered
-// with errUpdated and the daemon shuts down, so the caller can start the new
-// one.
+// A stream request keeps the connection: frames go to the viewer one per
+// line, and the viewer's inputs come back the same way, until it hangs up.
+// Once browse has been updated, every request is answered with errUpdated
+// and the daemon shuts down, so the caller can start the new one.
 func handle(s *Session, conn net.Conn, updated func() bool) bool {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
@@ -205,12 +205,22 @@ func handle(s *Session, conn net.Conn, updated func() bool) bool {
 	}
 	if req.Cmd == "stream" && req.View != nil {
 		ctx, cancel := context.WithCancel(context.Background())
+		inputs := make(chan Input, 64)
 		go func() {
-			reader.ReadByte() // returns when the viewer closes the connection
-			cancel()
+			defer cancel()
+			for {
+				line, err := reader.ReadBytes('\n')
+				if err != nil {
+					return // the viewer hung up
+				}
+				var in Input
+				if json.Unmarshal(line, &in) == nil {
+					inputs <- in
+				}
+			}
 		}()
 		enc := json.NewEncoder(conn)
-		s.Stream(ctx, *req.View, func(f Frame) error { return enc.Encode(f) })
+		s.Stream(ctx, *req.View, func(f Frame) error { return enc.Encode(f) }, inputs)
 		cancel()
 		return false
 	}

@@ -1,12 +1,14 @@
-// What a viewer needs from the session: a stream of frames of the active tab,
-// and a way to send a person's mouse and keyboard input to it.
+// What a viewer needs from the session: frames of the active tab, of the bar,
+// and of the address box, and a way to send the person's mouse and keyboard
+// to any of them.
 package main
 
 import (
 	"context"
 	"errors"
-	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
@@ -17,37 +19,89 @@ import (
 )
 
 const (
-	frameGap    = 66 * time.Millisecond // at most about 15 frames a second
-	barInterval = 250 * time.Millisecond
-	agentShown  = 3 * time.Second // how long the bar shows that an agent acted
+	barRows    = 3                      // the bar's height, in terminal rows
+	boxRows    = 3                      // the address box's height, in terminal rows
+	pageGap    = 66 * time.Millisecond  // at most about 15 page frames a second
+	remoteGap  = 125 * time.Millisecond // 8 a second when frames cross a network
+	uiGap      = 40 * time.Millisecond  // the interface is small, so it may be quicker
+	stateEvery = 250 * time.Millisecond // how often the tabs and history are looked at
+	agentShown = 3 * time.Second        // how long the bar shows that an agent acted
+	noteShown  = 4 * time.Second        // how long an error shows under the bar
 )
 
-// Frame is one update for a viewer: the bar's contents, and a picture of the
-// active tab when it changed. A frame without a Tab means every tab is
-// closed. Back and Forward say whether the tab's history goes that way.
-// Loading is set while the page loads or an action on it, such as going to
-// an address, is still running, and Agent while an agent is acting on the tab. Tabs lists every open tab, in order, for the bar.
-type Frame struct {
-	Tab     string    `json:"tab"`
-	URL     string    `json:"url"`
-	Title   string    `json:"title"`
-	Back    bool      `json:"back"`
-	Forward bool      `json:"forward"`
-	Loading bool      `json:"loading"`
-	Agent   bool      `json:"agent"`
-	Tabs    []TabInfo `json:"tabs,omitempty"`
-	PNG     []byte    `json:"png,omitempty"`
+// View is the terminal a viewer draws into: its size in cells, a cell's size
+// in device pixels, the device pixels per CSS pixel to render at, its colors,
+// and whether frames cross a network, which asks for fewer of them.
+type View struct {
+	Cols   int     `json:"cols"`
+	Rows   int     `json:"rows"`
+	CellW  float64 `json:"cellW"`
+	CellH  float64 `json:"cellH"`
+	Scale  float64 `json:"scale"`
+	FG     string  `json:"fg"`
+	BG     string  `json:"bg"`
+	Remote bool    `json:"remote,omitempty"`
 }
 
-// View is the page area a viewer draws into: its size in CSS pixels and the
-// device pixels per CSS pixel. Dark says the terminal has a dark background,
-// so pages that offer a dark look use it, as they would with a dark system
-// theme.
-type View struct {
-	Width  int     `json:"width"`
-	Height int     `json:"height"`
-	Scale  float64 `json:"scale"`
-	Dark   bool    `json:"dark,omitempty"`
+// screen is the whole terminal in CSS pixels, which the interface fills.
+func (v View) screen() (w, h int) {
+	return int(float64(v.Cols) * v.CellW / v.Scale), int(float64(v.Rows) * v.CellH / v.Scale)
+}
+
+// page is the area under the bar in CSS pixels, which the page fills.
+func (v View) page() (w, h int) {
+	return int(float64(v.Cols) * v.CellW / v.Scale), int(float64(v.Rows-barRows) * v.CellH / v.Scale)
+}
+
+// barHeight is the bar's height in CSS pixels: barRows cells exactly, so the
+// page sits right under it.
+func (v View) barHeight() float64 {
+	return float64(barRows) * v.CellH / v.Scale
+}
+
+// box is where the address box goes, in whole cells from column and row 1:
+// boxRows tall, three fifths of the columns wide, centered across and three
+// tenths of the way down the page area, at eye level.
+func (v View) box() (col, row, cols, rows int) {
+	cols = min(max(v.Cols*3/5, 20), v.Cols-2)
+	return (v.Cols-cols)/2 + 1, barRows + 1 + (v.Rows-barRows-boxRows)*3/10, cols, boxRows
+}
+
+// boxPx is the box's place on the screen in CSS pixels.
+func (v View) boxPx() (x, y, w, h float64) {
+	col, row, cols, rows := v.box()
+	return float64(col-1) * v.CellW / v.Scale, float64(row-1) * v.CellH / v.Scale,
+		float64(cols) * v.CellW / v.Scale, float64(rows) * v.CellH / v.Scale
+}
+
+// dark reports whether the terminal's background is dark, so pages that
+// offer a dark look use it. A background that is not #rrggbb counts as dark.
+func (v View) dark() bool {
+	var rgb [3]int
+	if len(v.BG) != 7 || v.BG[0] != '#' {
+		return true
+	}
+	for i := range rgb {
+		n, err := strconv.ParseUint(v.BG[1+2*i:3+2*i], 16, 8)
+		if err != nil {
+			return true
+		}
+		rgb[i] = int(n)
+	}
+	return 0.2126*float64(rgb[0])+0.7152*float64(rgb[1])+0.0722*float64(rgb[2]) < 128
+}
+
+// Frame is one update for a viewer. A frame with a PNG is a picture of one
+// Layer: "page", "bar", or "box". Every frame carries the state the viewer
+// routes by: the active tab (none means every tab is closed), whether the
+// box holds the keyboard, and whether the tab is blank, which shows the
+// start screen: the box over nothing.
+type Frame struct {
+	Layer   string `json:"layer,omitempty"`
+	PNG     []byte `json:"png,omitempty"`
+	Tab     string `json:"tab"`
+	Editing bool   `json:"editing"`
+	Start   bool   `json:"start"`
 }
 
 // markAgent records that an agent is acting on a tab, for the viewer's bar.
@@ -88,78 +142,195 @@ func (s *Session) Cycle(step int) (TabInfo, error) {
 	return s.info(t)
 }
 
-// Stream sends frames of the active tab until ctx ends, following the active
-// tab as it changes. While a tab is shown, its page is sized to view. Frames
-// come from Chrome's screencast, which only produces one when the page
+// Stream sends frames to a viewer until ctx ends: pictures of the active tab,
+// following it as it changes, pictures of the bar and the box, and the state
+// the viewer routes input by. Inputs from the viewer arrive on in. Pictures
+// come from Chrome's screencast, which only produces one when something
 // changes, so an idle page costs nothing.
-func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error) error {
+func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error, in <-chan Input) error {
 	var (
-		shown   *tab
-		stop    = func() {}
-		pending = make(chan []byte, 1)
-		last    Frame
-		lastPNG time.Time
+		shown    *tab
+		stopPage = func() {}
+		pngs     = map[string]chan []byte{"page": make(chan []byte, 1), "bar": make(chan []byte, 1), "box": make(chan []byte, 1)}
+		sent     = map[string]time.Time{}
+		editing  atomic.Bool
+		changed  = make(chan struct{}, 1)
+		note     string
+		noteAt   time.Time
+		box      *iface
 	)
-	defer func() { stop() }()
+	defer func() { stopPage() }()
 
-	bar := time.NewTicker(barInterval)
-	defer bar.Stop()
+	// The interface asks the session for things on the person's behalf.
+	act := func(m uiMessage) {
+		switch m.T {
+		case "editing":
+			editing.Store(m.On)
+			select {
+			case changed <- struct{}{}:
+			default:
+			}
+			return
+		case "edit":
+			text := ""
+			if t := s.activeTab(); t != nil {
+				if info, err := s.info(t); err == nil && info.URL != "about:blank" {
+					text = info.URL
+				}
+			}
+			go box.edit(text)
+			return
+		}
+		go func() {
+			var err error
+			switch m.T {
+			case "go":
+				_, err = s.Goto("", m.URL)
+			case "new":
+				_, err = s.Open("about:blank")
+			case "switch":
+				_, err = s.Activate(m.Tab)
+			case "close":
+				_, err = s.Close(m.Tab)
+			case "back":
+				_, err = s.Back("")
+			case "forward":
+				_, err = s.Forward("")
+			case "reload":
+				_, err = s.Reload("")
+			case "stop":
+				_, err = s.Stop("")
+			}
+			if err != nil {
+				note, noteAt = err.Error(), time.Now()
+			}
+		}()
+	}
+	screenW, _ := view.screen()
+	bar, err := s.openInterface(view, "bar", screenW, int(view.barHeight()), act)
+	if err != nil {
+		return err
+	}
+	defer bar.close()
+	_, _, boxW, boxH := view.boxPx()
+	box, err = s.openInterface(view, "box", int(boxW), int(boxH), act)
+	if err != nil {
+		return err
+	}
+	defer box.close()
+	defer cast(bar.ctx, screenW, int(view.barHeight()), view.Scale, pngs["bar"])()
+	defer cast(box.ctx, int(boxW), int(boxH), view.Scale, pngs["box"])()
+
+	gap := pageGap
+	if view.Remote {
+		gap = remoteGap
+	}
+	tick := time.NewTicker(stateEvery)
+	defer tick.Stop()
 	for {
 		t := s.activeTab()
 		if t == nil {
 			return send(Frame{})
 		}
 		if t != shown {
-			stop()
+			stopPage()
+			if shown != nil && editing.Load() {
+				box.blur() // the box was for the tab just left
+			}
 			shown = t
-			stop = screencast(t, view, pending)
+			stopPage = t.show(view, pngs["page"])
 		}
 
-		f := Frame{Tab: t.id}
-		if info, err := s.info(t); err == nil {
-			f.URL, f.Title = info.URL, info.Title
+		st, start := s.uiState(t)
+		if time.Since(noteAt) < noteShown {
+			st.Note = note
 		}
-		f.Back, f.Forward = history(t)
-		f.Loading = t.loading() || t.acting()
-		f.Tabs, _ = s.List()
-		t.state.Lock()
-		f.Agent = time.Since(t.agentAt) < agentShown
-		t.state.Unlock()
+		bar.update(st)
+		box.update(st)
+		if start && !editing.Load() {
+			box.edit("") // the start screen is the box, so it has the keyboard
+		}
 
+		f := Frame{Tab: t.id, Start: start, Editing: editing.Load()}
 		select {
 		case <-ctx.Done():
 			return nil
-		case png := <-pending:
-			if wait := frameGap - time.Since(lastPNG); wait > 0 {
-				time.Sleep(wait)
-				// A newer picture may have arrived while waiting.
-				select {
-				case png = <-pending:
-				default:
-				}
+		case png := <-pngs["page"]:
+			f.Layer, f.PNG = "page", pace(pngs["page"], png, sent, "page", gap)
+		case png := <-pngs["bar"]:
+			f.Layer, f.PNG = "bar", pace(pngs["bar"], png, sent, "bar", uiGap)
+		case png := <-pngs["box"]:
+			f.Layer, f.PNG = "box", pace(pngs["box"], png, sent, "box", uiGap)
+		case <-changed:
+			f.Editing = editing.Load()
+		case input, ok := <-in:
+			if !ok {
+				return nil
 			}
-			f.PNG = png
-			lastPNG = time.Now()
-		case <-bar.C:
-			if sameBar(f, last) {
-				continue
-			}
+			s.route(input, t, bar, box)
+			continue
+		case <-tick.C:
+			continue
 		}
 		if err := send(f); err != nil {
 			return err
 		}
-		f.PNG = nil
-		last = f
 	}
 }
 
-// sameBar reports whether two frames show the same bar.
-func sameBar(a, b Frame) bool {
-	return a.Tab == b.Tab && a.URL == b.URL && a.Title == b.Title &&
-		a.Back == b.Back && a.Forward == b.Forward && a.Loading == b.Loading && a.Agent == b.Agent &&
-		slices.EqualFunc(a.Tabs, b.Tabs, func(x, y TabInfo) bool {
-			return x.Tab == y.Tab && x.Active == y.Active && x.URL == y.URL && x.Title == y.Title
-		})
+// pace holds a picture of layer back until gap has passed since the last
+// one sent, and takes a newer picture that arrived meanwhile instead.
+func pace(pending chan []byte, png []byte, sent map[string]time.Time, layer string, gap time.Duration) []byte {
+	if wait := gap - time.Since(sent[layer]); wait > 0 {
+		time.Sleep(wait)
+		select {
+		case png = <-pending:
+		default:
+		}
+	}
+	sent[layer] = time.Now()
+	return png
+}
+
+// uiState is what the interface shows for the tab t, which is active: the
+// tabs, where its history goes, and whether it is loading or an agent is on
+// it. start says the tab is blank, which shows the start screen.
+func (s *Session) uiState(t *tab) (st uiState, start bool) {
+	st = uiState{Loading: t.loading() || t.acting()}
+	st.Back, st.Forward = history(t)
+	t.state.Lock()
+	st.Agent = time.Since(t.agentAt) < agentShown
+	t.state.Unlock()
+	tabs, _ := s.List()
+	for _, info := range tabs {
+		st.Tabs = append(st.Tabs, uiTab{ID: info.Tab, Label: tabLabel(info), URL: info.URL, Active: info.Active})
+		if info.Active {
+			start = info.URL == "about:blank"
+		}
+	}
+	return st, start
+}
+
+// route delivers a viewer's input to the bar, the box, or the tab shown.
+func (s *Session) route(in Input, t *tab, bar, box *iface) {
+	switch {
+	case in.Kind == "edit":
+		text := ""
+		if info, err := s.info(t); err == nil && info.URL != "about:blank" {
+			text = info.URL
+		}
+		box.edit(text)
+	case in.Kind == "blur":
+		box.blur()
+	case in.To == "bar":
+		dispatchInput(bar.ctx, in)
+	case in.To == "box":
+		dispatchInput(box.ctx, in)
+	default:
+		if t.pendingDialog() == nil {
+			dispatchInput(t.ctx, in)
+		}
+	}
 }
 
 // history reports whether t can go back and forward. The blank page a tab
@@ -178,44 +349,25 @@ func history(t *tab) (back, forward bool) {
 	return back, h.CurrentIndex < int64(len(h.Entries))-1
 }
 
-// screencast sizes t's page to view and sends its pictures to out, keeping
-// only the newest. Each time a document first paints content or finishes
-// loading, a fresh picture follows too. The returned func stops it
-// and restores the default size.
-// Chrome sends the pictures as events of the tab, so they are listened for
-// on the tab's context.
-func screencast(t *tab, view View, out chan []byte) func() {
-	ctx, cancel := context.WithCancel(t.ctx)
-	put := func(png []byte) {
-		select {
-		case <-out:
-		default:
-		}
-		out <- png
-	}
-
-	chromedp.Run(t.ctx, chromedp.EmulateViewport(int64(view.Width), int64(view.Height), chromedp.EmulateScale(view.Scale)))
+// show sizes t's page to the view's page area and sends its pictures to out
+// until the returned func is called, which restores the default size. Each
+// time a document first paints content or finishes loading, a fresh picture
+// follows too, since the screencast sends none of some pages, such as
+// Chrome's error pages.
+func (t *tab) show(view View, out chan []byte) func() {
+	w, h := view.page()
+	chromedp.Run(t.ctx, chromedp.EmulateViewport(int64(w), int64(h), chromedp.EmulateScale(view.Scale)))
 	scheme := "light"
-	if view.Dark {
+	if view.dark() {
 		scheme = "dark"
 	}
 	chromedp.Call(t.ctx, emulation.SetEmulatedMedia, emulation.SetEmulatedMediaParams{
 		Features: []*emulation.MediaFeature{{Name: "prefers-color-scheme", Value: scheme}},
 	})
-	frames := chromedp.Events(ctx, page.ScreencastFrame)
-	chromedp.Call(t.ctx, page.StartScreencast, page.StartScreencastParams{
-		Format:    page.StartScreencastFormatPng,
-		MaxWidth:  int64(float64(view.Width) * view.Scale),
-		MaxHeight: int64(float64(view.Height) * view.Scale),
-	})
-	// The screencast only sends a picture once something changes, so start
-	// with a screenshot of the page as it is.
-	if png, err := chromedp.Run(t.ctx, chromedp.CaptureScreenshot()); err == nil {
-		put(png)
-	}
+	w, h = view.page()
+	stop := cast(t.ctx, w, h, view.Scale, out)
+	ctx, cancel := context.WithCancel(t.ctx)
 	go func() {
-		// The screencast sends no pictures of some pages, such as Chrome's error
-		// pages, so take one whenever a document paints or finishes loading.
 		tick := time.NewTicker(100 * time.Millisecond)
 		defer tick.Stop()
 		seen := t.painted.Load()
@@ -228,34 +380,67 @@ func screencast(t *tab, view View, out chan []byte) func() {
 			if now := t.painted.Load(); now != seen {
 				seen = now
 				if png, err := chromedp.Run(t.ctx, chromedp.CaptureScreenshot()); err == nil {
-					put(png)
+					put(out, png)
 				}
 			}
 		}
 	}()
-	go func() {
-		for ev, err := range frames {
-			if err != nil {
-				return
-			}
-			chromedp.Call(t.ctx, page.ScreencastFrameAck, page.ScreencastFrameAckParams{SessionID: ev.SessionID})
-			put(ev.Data)
-		}
-	}()
-
 	return func() {
 		cancel()
-		chromedp.Call(t.ctx, page.StopScreencast, cdp.Empty{})
+		stop()
 		chromedp.Run(t.ctx, chromedp.EmulateViewport(viewportWidth, viewportHeight))
 		chromedp.Call(t.ctx, emulation.SetEmulatedMedia, emulation.SetEmulatedMediaParams{})
 	}
 }
 
-// Input is one piece of a person's input for the active tab. Kind is "mouse",
-// "key", or "text". Mouse coordinates are CSS pixels in the page. Key is a
-// single character or a key name such as Enter, with Modifiers like Control.
+// cast streams pictures of ctx's tab, w x h CSS pixels at scale, to out,
+// keeping only the newest. It starts with a picture of the tab as it is,
+// since the screencast only sends one once something changes. The returned
+// func stops it.
+func cast(ctx context.Context, w, h int, scale float64, out chan []byte) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	frames := chromedp.Events(ctx, page.ScreencastFrame)
+	chromedp.Call(ctx, page.StartScreencast, page.StartScreencastParams{
+		Format:    page.StartScreencastFormatPng,
+		MaxWidth:  int64(float64(w) * scale),
+		MaxHeight: int64(float64(h) * scale),
+	})
+	if png, err := chromedp.Run(ctx, chromedp.CaptureScreenshot()); err == nil {
+		put(out, png)
+	}
+	go func() {
+		for ev, err := range frames {
+			if err != nil {
+				return
+			}
+			chromedp.Call(ctx, page.ScreencastFrameAck, page.ScreencastFrameAckParams{SessionID: ev.SessionID})
+			put(out, ev.Data)
+		}
+	}()
+	return func() {
+		chromedp.Call(ctx, page.StopScreencast, cdp.Empty{})
+		cancel()
+	}
+}
+
+// put replaces whatever picture is waiting in out with png.
+func put(out chan []byte, png []byte) {
+	select {
+	case <-out:
+	default:
+	}
+	out <- png
+}
+
+// Input is one piece of a person's input. Kind is "mouse", "key", or "text",
+// for the page unless To says "bar" or "box"; "edit" puts the tab's address
+// in the box and gives it the keyboard, and "blur" takes the keyboard back.
+// Mouse coordinates are CSS pixels from the top left of what they are for.
+// Key is a single character or a key name such as Enter, with Modifiers like
+// Control.
 type Input struct {
 	Kind      string   `json:"kind"`
+	To        string   `json:"to,omitempty"`
 	Type      string   `json:"type,omitempty"` // mousePressed, mouseReleased, mouseMoved, mouseWheel
 	X         float64  `json:"x,omitempty"`
 	Y         float64  `json:"y,omitempty"`
@@ -302,7 +487,12 @@ func (s *Session) SendInput(in Input) error {
 	if d := t.pendingDialog(); d != nil {
 		return dialogError(d)
 	}
-	ctx, cancel := context.WithTimeout(t.ctx, commandTimeout)
+	return dispatchInput(t.ctx, in)
+}
+
+// dispatchInput sends one input event to ctx's tab.
+func dispatchInput(tabCtx context.Context, in Input) error {
+	ctx, cancel := context.WithTimeout(tabCtx, commandTimeout)
 	defer cancel()
 
 	var mods []chromedp.Modifier

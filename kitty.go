@@ -14,11 +14,15 @@ import (
 
 const kittyChunk = 4096 // the protocol caps each escape sequence's payload at 4096 bytes
 
-// pageImage is the id of the image showing the page, so each frame replaces
-// the last; the bar's icons follow it. Ids start from the process id, so
+// pageImage, barImage, and boxImage are the ids of the three images a viewer
+// shows, so each frame replaces the last. Ids start from the process id, so
 // viewers in one terminal, such as two tmux panes, keep their own images.
 // Inside tmux an id is also its placeholder cells' color.
-var pageImage = uint32(os.Getpid()&0xffff)<<8 + 1
+var (
+	pageImage = uint32(os.Getpid()&0xffff)<<8 + 1
+	barImage  = pageImage + 1
+	boxImage  = pageImage + 2
+)
 
 // painter writes images for one terminal.
 type painter struct {
@@ -104,24 +108,14 @@ func tempImage(png []byte) (string, error) {
 	return f.Name(), nil
 }
 
-// placeholders returns the cells that show image id inside tmux, cols x rows
-// of them from row top and column left. Each cell is U+10EEEE with diacritics
-// for its row and column, colored with the image id.
-func placeholders(id uint32, top, left, cols, rows int) string {
-	cols = min(cols, len(rowColumnDiacritics))
-	rows = min(rows, len(rowColumnDiacritics))
-	var b strings.Builder
-	fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm", id>>16&0xff, id>>8&0xff, id&0xff)
-	for row := range rows {
-		fmt.Fprintf(&b, "\x1b[%d;%dH", top+row, left)
-		for col := range cols {
-			b.WriteRune(0x10EEEE)
-			b.WriteRune(rowColumnDiacritics[row])
-			b.WriteRune(rowColumnDiacritics[col])
-		}
+// placeholder is one cell that shows image id inside tmux: U+10EEEE with
+// diacritics for the image's row and column, colored with the image id.
+func placeholder(id uint32, row, col int) string {
+	if row >= len(rowColumnDiacritics) || col >= len(rowColumnDiacritics) {
+		return " "
 	}
-	b.WriteString("\x1b[39m")
-	return b.String()
+	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", id>>16&0xff, id>>8&0xff, id&0xff) +
+		string(rune(0x10EEEE)) + string(rowColumnDiacritics[row]) + string(rowColumnDiacritics[col])
 }
 
 // rowColumnDiacritics encode row and column numbers on placeholder cells, from
