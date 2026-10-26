@@ -4,7 +4,7 @@
 # which is the browser profile with its logins and the daemon's log. Files
 # you downloaded stay in ~/Downloads.
 # Without a checkout:
-#   curl -fsSL https://raw.githubusercontent.com/fschrhunt/browse/main/scripts/uninstall.sh | sh
+#   curl -fsSL https://fschrhunt.com/browse/uninstall.sh | sh
 set -eu
 
 BIN="$HOME/.local/bin/browse"

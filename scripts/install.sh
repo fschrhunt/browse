@@ -9,7 +9,7 @@
 # The shell is pinned to one version from Chrome for Testing, the Chromium
 # team's own build pipeline. Needs curl, and unzip or python3; never go. To
 # install without a checkout:
-#   curl -fsSL https://raw.githubusercontent.com/fschrhunt/browse/main/scripts/install.sh | sh
+#   curl -fsSL https://fschrhunt.com/browse/install.sh | sh
 # scripts/uninstall.sh removes all of it.
 set -eu
 

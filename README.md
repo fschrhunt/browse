@@ -13,7 +13,7 @@ graphics protocol: Ghostty, kitty, and WezTerm, and tmux inside them.
 
 ## Install
 
-    curl -fsSL https://raw.githubusercontent.com/fschrhunt/browse/main/scripts/install.sh | sh
+    curl -fsSL https://fschrhunt.com/browse/install.sh | sh
 
 This puts `browse` in `~/.local/bin`, Chrome's headless shell in
 `~/.local/share/browse`, and the agent skill in each agent's skills folder.
@@ -21,7 +21,7 @@ This puts `browse` in `~/.local/bin`, Chrome's headless shell in
 
 ## Uninstall
 
-    curl -fsSL https://raw.githubusercontent.com/fschrhunt/browse/main/scripts/uninstall.sh | sh
+    curl -fsSL https://fschrhunt.com/browse/uninstall.sh | sh
 
 This removes everything browse installed or made, including its logins.
 
