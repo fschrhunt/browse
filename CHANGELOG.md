@@ -8,6 +8,8 @@
 - The installer checks the archive against the release's checksums, and takes
   `--version vX.Y.Z`. It installs with `curl -fsSL https://fschrhunt.com/browse/install.sh | sh`.
 - `browse version` prints the version.
+- Chrome starts on Ubuntu 23.10 and later, whose AppArmor rules block Chrome's sandbox; there
+  it runs without one.
 
 ## v0.1.0 · 2026-10-26
 
