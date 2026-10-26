@@ -1,6 +1,6 @@
 # browse releases
 
-## Unreleased
+## v0.2.0 · 2026-10-26
 
 - Releases go through Actions: `scripts/release.sh` names the changelog section, then asks
   Actions to tag. Each release has archives for Linux and macOS with checksums and build
