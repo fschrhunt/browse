@@ -20,9 +20,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chromedp/cdproto/browser"
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/target"
@@ -50,7 +52,8 @@ type tab struct {
 	cancel context.CancelFunc
 	target target.ID
 
-	loading func() bool // whether the page is loading, for the viewer's bar
+	loading func() bool  // whether the page is loading, for the viewer's bar
+	painted atomic.Int64 // how many times a document first painted content or finished loading
 
 	mu sync.Mutex // serializes actions on this tab
 
@@ -248,6 +251,10 @@ func (s *Session) prepare(ctx context.Context) error {
 	if _, err := chromedp.Call(ctx, emulation.SetFocusEmulationEnabled, emulation.SetFocusEmulationEnabledParams{Enabled: true}); err != nil {
 		return err
 	}
+	// Lifecycle events say when a new document first paints content.
+	if _, err := chromedp.Call(ctx, page.SetLifecycleEventsEnabled, page.SetLifecycleEventsEnabledParams{Enabled: true}); err != nil {
+		return err
+	}
 	if s.identity == nil {
 		return nil
 	}
@@ -290,7 +297,24 @@ func (s *Session) register(ctx context.Context, cancel context.CancelFunc) *tab 
 	s.order = append(s.order, t.id)
 	s.active = t.id
 	go t.watchDialogs()
+	go t.watchPaint()
 	return t
+}
+
+// watchPaint counts in t.painted each time a document first paints content
+// or finishes loading, which tells viewers to take a fresh picture.
+func (t *tab) watchPaint() {
+	for ev, err := range chromedp.Events(t.ctx, page.LifecycleEvent) {
+		if err != nil {
+			return
+		}
+		if ev.FrameID != cdp.FrameID(t.target) {
+			continue
+		}
+		if ev.Name == "firstContentfulPaint" || ev.Name == "load" {
+			t.painted.Add(1)
+		}
+	}
 }
 
 // forget removes a tab from the list. The caller holds s.mu.

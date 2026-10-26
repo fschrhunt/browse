@@ -205,6 +205,7 @@ type viewer struct {
 	startShown bool   // the start screen is drawn in place of the page
 	boxShown   bool   // the address box is drawn
 	lastPNG    []byte // the newest picture of the page, to show on leaving it
+	pngURL     string // the address the newest picture was of
 
 	cursorRow, cursorCol int // where the caret is drawn, or row 0 for nowhere
 
@@ -378,7 +379,7 @@ func (v *viewer) loop(frames <-chan Frame, in <-chan []byte, resized <-chan os.S
 			}
 			v.frame = f
 			if f.PNG != nil {
-				v.lastPNG = f.PNG
+				v.lastPNG, v.pngURL = f.PNG, f.URL
 			}
 			fmt.Print(v.page(f.PNG != nil) + v.screen())
 		case b, ok := <-in:
@@ -468,9 +469,13 @@ func (v *viewer) newTab() {
 	v.startEdit("")
 }
 
-// onStart reports whether the tab shown is blank, so the start screen shows.
+// onStart reports whether the start screen shows: while the tab is blank, and
+// after an address is entered there, until the new page's first picture.
 func (v *viewer) onStart() bool {
-	return v.frame.Tab != "" && v.frame.URL == "about:blank"
+	if v.frame.Tab == "" {
+		return false
+	}
+	return v.frame.URL == "about:blank" || v.startShown && v.pngURL != v.frame.URL
 }
 
 // startEdit starts editing the address with text in it, all selected.
@@ -638,7 +643,7 @@ func (v *viewer) page(newPNG bool) string {
 		}
 		v.boxShown = false // the box's text was cleared with the page
 	case !start && v.startShown:
-		v.editing = false // what was typed in the box is done with
+		v.editing, v.edit = false, nil // what was typed in the box is done with
 		if v.p.tmux {
 			out = placeholders(pageImage, barRows+1, 1, v.lay.cols, v.lay.rows-barRows)
 		}

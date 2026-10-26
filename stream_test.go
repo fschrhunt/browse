@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -175,4 +178,27 @@ func redCenter(b []byte) bool {
 	}
 	r, g, _, _ := img.At(img.Bounds().Dx()/2, img.Bounds().Dy()/2).RGBA()
 	return r > 0xc000 && g < 0x4000
+}
+
+// A page that fails to load still gets a picture: Chrome's error page.
+func TestStreamShowsErrorPage(t *testing.T) {
+	s, tab := newTestSession(t, map[string]string{"/": ``})
+	s.Goto(tab, "about:blank")
+	frames := startStream(t, s, View{Width: 400, Height: 300, Scale: 1})
+	nextFrame(t, frames)
+
+	refused := httptest.NewServer(http.NotFoundHandler())
+	refused.Close() // nothing listens there now
+	go s.Goto(tab, refused.URL)
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case f := <-frames:
+			if f.PNG != nil && strings.HasPrefix(f.URL, refused.URL) {
+				return
+			}
+		case <-timeout:
+			t.Fatal("no picture of the failed page")
+		}
+	}
 }

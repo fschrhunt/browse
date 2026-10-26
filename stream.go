@@ -179,7 +179,9 @@ func history(t *tab) (back, forward bool) {
 }
 
 // screencast sizes t's page to view and sends its pictures to out, keeping
-// only the newest. The returned func stops it and restores the default size.
+// only the newest. Each time a document first paints content or finishes
+// loading, a fresh picture follows too. The returned func stops it
+// and restores the default size.
 // Chrome sends the pictures as events of the tab, so they are listened for
 // on the tab's context.
 func screencast(t *tab, view View, out chan []byte) func() {
@@ -211,6 +213,26 @@ func screencast(t *tab, view View, out chan []byte) func() {
 	if png, err := chromedp.Run(t.ctx, chromedp.CaptureScreenshot()); err == nil {
 		put(png)
 	}
+	go func() {
+		// The screencast sends no pictures of some pages, such as Chrome's error
+		// pages, so take one whenever a document paints or finishes loading.
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		seen := t.painted.Load()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			if now := t.painted.Load(); now != seen {
+				seen = now
+				if png, err := chromedp.Run(t.ctx, chromedp.CaptureScreenshot()); err == nil {
+					put(png)
+				}
+			}
+		}
+	}()
 	go func() {
 		for ev, err := range frames {
 			if err != nil {

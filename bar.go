@@ -375,7 +375,8 @@ func (v *viewer) box() string {
 	inner := width - 4 // two columns of padding on each side
 	field := dim + fit(placeholder, inner) + reset + strings.Repeat(" ", max(inner-len(placeholder), 0))
 	v.cursorRow, v.cursorCol = top+1, left+2
-	if v.editing && len(v.edit) > 0 {
+	// The address stays in the box after Enter, while its page loads.
+	if len(v.edit) > 0 {
 		var caret int
 		field, caret = v.editField(inner)
 		v.cursorCol += caret

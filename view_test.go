@@ -201,7 +201,8 @@ func TestIconsDraw(t *testing.T) {
 }
 
 // On a blank tab, typing goes into the start screen's box with the cursor
-// after it, and leaving the blank tab ends the editing.
+// after it. The start screen stays until the new page's first picture, which
+// ends the editing.
 func TestStartScreenTakesTyping(t *testing.T) {
 	v := testViewer()
 	v.frame = Frame{Tab: "t1", URL: "about:blank"}
@@ -216,9 +217,15 @@ func TestStartScreenTakesTyping(t *testing.T) {
 		t.Errorf("the caret should be a bar cursor after the x: %q", out)
 	}
 
+	// The address is entered: the start screen holds until the page's first picture.
 	v.frame.URL = "https://example.com/"
 	v.page(false)
-	if v.editing {
-		t.Error("still editing after leaving the blank tab")
+	if !v.onStart() {
+		t.Error("the start screen gave way before the new page had a picture")
+	}
+	v.lastPNG, v.pngURL = []byte("png"), v.frame.URL
+	v.page(true)
+	if v.onStart() || v.editing {
+		t.Errorf("after the first picture: start screen %t, editing %t", v.onStart(), v.editing)
 	}
 }
