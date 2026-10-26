@@ -26,7 +26,9 @@ import (
 	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
+	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
@@ -63,6 +65,7 @@ type tab struct {
 	dialog    *page.EventJavascriptDialogOpening // an open confirm or prompt
 	interrupt context.CancelFunc                 // cancels the running action
 	alerts    []string                           // alerts accepted and not yet reported
+	errors    []string                           // page errors and failed requests not yet reported
 	agentAt   time.Time                          // when an agent last acted on the tab
 }
 
@@ -98,6 +101,7 @@ type TabInfo struct {
 	Dialog string   `json:"dialog,omitempty"`
 	Opened []string `json:"opened,omitempty"`
 	Alerts []string `json:"alerts,omitempty"`
+	Errors []string `json:"errors,omitempty"` // uncaught errors and failed requests since the last action
 }
 
 // identity is how desktop Chrome at the installed version presents itself:
@@ -255,6 +259,10 @@ func (s *Session) prepare(ctx context.Context) error {
 	if _, err := chromedp.Call(ctx, page.SetLifecycleEventsEnabled, page.SetLifecycleEventsEnabledParams{Enabled: true}); err != nil {
 		return err
 	}
+	// Network events say which requests fail.
+	if _, err := chromedp.Call(ctx, network.Enable, network.EnableParams{}); err != nil {
+		return err
+	}
 	if s.identity == nil {
 		return nil
 	}
@@ -298,7 +306,60 @@ func (s *Session) register(ctx context.Context, cancel context.CancelFunc) *tab 
 	s.active = t.id
 	go t.watchDialogs()
 	go t.watchPaint()
+	go t.watchErrors()
 	return t
+}
+
+// errorsKept is how many of a tab's errors wait for the next action's result.
+const errorsKept = 10
+
+// watchErrors keeps the page's uncaught errors and its failed requests, bar
+// ones it cancelled itself, for the next action's result, so an agent sees
+// why a page misbehaves.
+func (t *tab) watchErrors() {
+	urls := map[network.RequestID]string{}
+	note := func(msg string) {
+		t.state.Lock()
+		if len(t.errors) < errorsKept {
+			t.errors = append(t.errors, msg)
+		}
+		t.state.Unlock()
+	}
+	go func() {
+		for ev, err := range chromedp.Events(t.ctx, cdpruntime.ExceptionThrown) {
+			if err != nil {
+				return
+			}
+			msg := ev.ExceptionDetails.Text
+			if ex := ev.ExceptionDetails.Exception; ex != nil && ex.Description != "" {
+				msg = ex.Description
+			}
+			if i := strings.Index(msg, "\n"); i > 0 {
+				msg = msg[:i] // the first line; the rest is a stack
+			}
+			note("page error: " + msg)
+		}
+	}()
+	go func() {
+		for ev, err := range chromedp.Events(t.ctx, network.RequestWillBeSent) {
+			if err != nil {
+				return
+			}
+			if len(urls) > 500 {
+				clear(urls)
+			}
+			urls[ev.RequestID] = ev.Request.URL
+		}
+	}()
+	for ev, err := range chromedp.Events(t.ctx, network.LoadingFailed) {
+		if err != nil {
+			return
+		}
+		if ev.Canceled {
+			continue
+		}
+		note(fmt.Sprintf("request failed: %s %s", urls[ev.RequestID], ev.ErrorText))
+	}
 }
 
 // watchPaint counts in t.painted each time a document first paints content

@@ -273,3 +273,51 @@ func TestParseKeys(t *testing.T) {
 		t.Error("want an error for an unknown key")
 	}
 }
+
+// An action's result carries the page's uncaught errors and failed requests,
+// so an agent sees why a page misbehaves; they are reported once.
+func TestActionReportsPageErrors(t *testing.T) {
+	s, tab := newTestSession(t, map[string]string{"/": `
+		<button onclick="fetch('http://127.0.0.1:1/missing').catch(() => {}); setTimeout(() => { throw new Error('boom') }, 0)">Go</button>`})
+	s.Snapshot(tab)
+
+	res, err := s.Click(tab, "e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(res.Errors, "\n")
+	if !strings.Contains(joined, "boom") || !strings.Contains(joined, "127.0.0.1:1/missing") {
+		t.Errorf("errors %q", res.Errors)
+	}
+	if again, _ := s.Reload(tab); len(again.Errors) != 0 {
+		t.Errorf("errors reported twice: %q", again.Errors)
+	}
+}
+
+// A screenshot with --refs shows each element's ref on it, and leaves the
+// page as it was.
+func TestScreenshotLabelsRefs(t *testing.T) {
+	s, tab := newTestSession(t, map[string]string{"/": `<body style="margin:0;background:#fff"><button style="position:absolute;left:200px;top:200px">Go</button>`})
+	s.Snapshot(tab)
+
+	shot, err := s.Screenshot(tab, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := decodePNG(t, shot.PNG)
+	orange := false
+	for y := 170; y < 210 && !orange; y++ {
+		for x := 190; x < 240; x++ {
+			if r, g, b, _ := img.At(x, y).RGBA(); r>>8 > 230 && g>>8 > 90 && g>>8 < 140 && b>>8 < 60 {
+				orange = true
+				break
+			}
+		}
+	}
+	if !orange {
+		t.Error("no orange label near the button")
+	}
+	if left := evalString(t, s, tab, "String(document.getElementById('__browse_labels'))"); left != "null" {
+		t.Errorf("labels left on the page: %s", left)
+	}
+}

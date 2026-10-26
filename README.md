@@ -9,7 +9,9 @@ page up beside the conversation with `browse show`. Logins persist, so a site
 you signed in to is signed in for your agents too.
 
 It runs on Linux and macOS, in terminals that show images with the kitty
-graphics protocol: Ghostty, kitty, and WezTerm, and tmux inside them.
+graphics protocol: Ghostty, kitty, and WezTerm, and tmux inside them. Over
+SSH it sends only what changed on the page, and copying puts text on your
+own clipboard.
 
 ## Install
 
@@ -30,3 +32,12 @@ This removes everything browse installed or made, including its logins.
     browse                 open the browser
     browse example.com     open a page
     browse help            every command and key
+
+## Develop
+
+The bar and the address box are `ui/index.html`, drawn by Chrome in hidden
+tabs and shown over the page as pictures. `go test ./...` drives a real
+Chrome. `scripts/screens.sh` takes pictures of the browser in kitty on a
+virtual display, through the scenarios a person goes through, into
+`dist/screens/sheet.png`; CI attaches that sheet to every run. Look at it
+after any change to how the browser looks or responds.

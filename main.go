@@ -25,8 +25,9 @@ const usage = `usage: browse [url]                 open the browser fullscreen i
 
 In the browser, the mouse and keyboard go to the page. Ctrl+L edits the
 address, Ctrl+T opens a tab, Ctrl+W closes one, Ctrl+PgUp and Ctrl+PgDn switch
-tabs, Alt+Left and Alt+Right go back and forward, Ctrl+R reloads, and Ctrl+Q
-leaves; the browser keeps running for agents.
+tabs, Alt+Left and Alt+Right go back and forward, Ctrl+R reloads, Ctrl+C copies
+what is selected to your clipboard, and Ctrl+Q leaves; the browser keeps
+running for agents.
 
 Pages
   open <url|file>        open a page in a new tab (x.com means https://x.com)
@@ -39,7 +40,9 @@ Pages
 Reading
   snapshot               list the page's elements with refs (e1, e2, ...)
   text [ref] [--all]     print the page's text, or one element's
-  shot <file> [--full]   save a screenshot; --full captures the whole page
+  shot <file> [--full] [--refs]
+                         save a screenshot; --full captures the whole page,
+                         --refs labels the last snapshot's elements on it
   eval <js>              run JavaScript in the page and print the result
 
 Acting (refs come from the last snapshot)
@@ -66,8 +69,9 @@ Display
   version                print browse's version
 
 Actions wait for the page to settle, then print where the browser ended up:
-the tab, its title and URL, and any tab the page opened, alert it showed, or
-dialog it left open. --tab picks a tab from ls; without it, commands use the
+the tab, its title and URL, and any tab the page opened, alert it showed,
+dialog it left open, or error it hit: uncaught JavaScript errors and failed
+requests since the last action. --tab picks a tab from ls; without it, commands use the
 active tab. --json prints the daemon's result as JSON.
 
 Logins persist in ~/.local/state/browse/profile, and downloads go to
@@ -114,6 +118,7 @@ type flags struct {
 	json bool
 	full bool
 	all  bool
+	refs bool
 }
 
 // parseArgs pulls the flags out of argv. The rest are positional.
@@ -134,6 +139,8 @@ func parseArgs(argv []string) ([]string, flags, error) {
 			f.full = true
 		case "--all":
 			f.all = true
+		case "--refs":
+			f.refs = true
 		default:
 			args = append(args, argv[i])
 		}
@@ -240,6 +247,9 @@ func printPlace(raw json.RawMessage) error {
 	}
 	for _, msg := range t.Alerts {
 		fmt.Printf("alert: %q\n", msg)
+	}
+	for _, msg := range t.Errors {
+		fmt.Println(msg)
 	}
 	if t.Dialog != "" {
 		fmt.Printf("dialog open: %s; answer with browse dialog accept or browse dialog dismiss\n", t.Dialog)
@@ -366,7 +376,7 @@ func command(name string, args []string, f flags) (Request, printer, error) {
 	case "text":
 		return Request{Cmd: "text", Tab: tab, Ref: ref, All: f.all}, printText, nil
 	case "shot":
-		return Request{Cmd: "screenshot", Tab: tab, Full: f.full}, saveShot(arg(0)), need(1, "a file")
+		return Request{Cmd: "screenshot", Tab: tab, Full: f.full, Refs: f.refs}, saveShot(arg(0)), need(1, "a file")
 	case "eval":
 		return Request{Cmd: "eval", Tab: tab, JS: arg(0)}, printJSON, need(1, "javascript")
 	case "click", "hover":

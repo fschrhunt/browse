@@ -146,6 +146,7 @@ func (s *Session) act(id string, acts bool, fn func(ctx context.Context) error) 
 	info.Opened = s.openedAfter(before)
 	t.state.Lock()
 	info.Alerts, t.alerts = t.alerts, nil
+	info.Errors, t.errors = t.errors, nil
 	t.state.Unlock()
 	return info, nil
 }
@@ -546,7 +547,7 @@ func (s *Session) Eval(id, js string) (any, error) {
 // Screenshot captures the tab's viewport, or the whole page when full is set.
 // It does not wait for the tab's lock, so a viewer keeps drawing while an
 // action runs.
-func (s *Session) Screenshot(id string, full bool) (Shot, error) {
+func (s *Session) Screenshot(id string, full, refs bool) (Shot, error) {
 	t, err := s.use(id, false)
 	if err != nil {
 		return Shot{}, err
@@ -563,6 +564,13 @@ func (s *Session) Screenshot(id string, full bool) (Shot, error) {
 	capture := chromedp.CaptureScreenshot()
 	if full {
 		capture = chromedp.FullScreenshot(100)
+	}
+	if refs {
+		// Labels on the elements of the last snapshot, for the picture only.
+		if _, err := chromedp.Run(ctx, chromedp.Evaluate[any](pageCall("label", true))); err != nil {
+			return Shot{}, err
+		}
+		defer chromedp.Run(t.ctx, chromedp.Evaluate[any](pageCall("label", false)))
 	}
 	png, err := chromedp.Run(ctx, capture)
 	return Shot{URL: info.URL, Title: info.Title, PNG: png}, err

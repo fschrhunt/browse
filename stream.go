@@ -109,6 +109,7 @@ type Frame struct {
 	Tab     string `json:"tab"`
 	Editing bool   `json:"editing"`
 	Start   bool   `json:"start"`
+	Copy    string `json:"copy,omitempty"` // text the person copied, for the clipboard
 }
 
 // markAgent records that an agent is acting on a tab, for the viewer's bar.
@@ -289,7 +290,10 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error,
 			if !ok {
 				return nil
 			}
-			s.route(input, t, bar, box)
+			if copied := s.route(input, t, bar, box); copied != "" {
+				f.Copy = copied
+				break
+			}
 			continue
 		case <-tick.C:
 			continue
@@ -333,9 +337,24 @@ func (s *Session) uiState(t *tab) (st uiState, start bool) {
 	return st, start
 }
 
-// route delivers a viewer's input to the bar, the box, or the tab shown.
-func (s *Session) route(in Input, t *tab, bar, box *iface) {
+// selectionJS is the text selected in a page, in a field or on the page.
+const selectionJS = `(() => {
+	const a = document.activeElement;
+	if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && a.selectionStart !== a.selectionEnd)
+		return a.value.slice(a.selectionStart, a.selectionEnd);
+	return String(getSelection());
+})()`
+
+// route delivers a viewer's input to the bar, the box, or the tab shown. A
+// copy returns the text selected there, for the viewer to put on the clipboard.
+func (s *Session) route(in Input, t *tab, bar, box *iface) (copied string) {
 	switch {
+	case in.Kind == "copy":
+		ctx := t.ctx
+		if in.To == "box" {
+			ctx = box.ctx
+		}
+		copied, _ = chromedp.Run(ctx, chromedp.Evaluate[string](selectionJS))
 	case in.Kind == "edit":
 		text := ""
 		if info, err := s.info(t); err == nil && info.URL != "about:blank" {
@@ -353,6 +372,7 @@ func (s *Session) route(in Input, t *tab, bar, box *iface) {
 			dispatchInput(t.ctx, in)
 		}
 	}
+	return copied
 }
 
 // history reports whether t can go back and forward. The blank page a tab
@@ -455,8 +475,9 @@ func put(out chan []byte, png []byte) {
 }
 
 // Input is one piece of a person's input. Kind is "mouse", "key", or "text",
-// for the page unless To says "bar" or "box"; "edit" puts the tab's address
-// in the box and gives it the keyboard, and "blur" takes the keyboard back.
+// for the page unless To says "bar" or "box"; "copy" asks for the selection
+// there; "edit" puts the tab's address in the box and gives it the keyboard,
+// and "blur" takes the keyboard back.
 // Mouse coordinates are CSS pixels from the top left of what they are for.
 // Key is a single character or a key name such as Enter, with Modifiers like
 // Control.

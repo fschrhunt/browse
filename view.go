@@ -328,7 +328,12 @@ func (v *viewer) loop(in <-chan []byte, resized <-chan os.Signal, parser *inputP
 				return true, nil
 			}
 			v.frame = f
-			fmt.Print(v.draw(f))
+			out := v.draw(f)
+			if f.Copy != "" {
+				// OSC 52 puts text on the clipboard of the terminal, even over SSH.
+				out += v.p.wrap("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(f.Copy)) + "\x1b\\")
+			}
+			fmt.Print(out)
 		case b, ok := <-in:
 			if !ok {
 				return true, nil
@@ -461,6 +466,8 @@ func (v *viewer) keyTarget() string {
 // shortcut acts on a browser shortcut and reports whether k was one.
 func (v *viewer) shortcut(k keyPress) bool {
 	switch {
+	case k.Ctrl && k.Key == "c":
+		v.send(Input{Kind: "copy", To: v.keyTarget()})
 	case k.Ctrl && k.Key == "l":
 		v.send(Input{Kind: "edit"})
 	case k.Ctrl && k.Key == "t":

@@ -13,11 +13,13 @@ persist, so sites the person signed in to stay signed in for you.
    `@e5 textbox "Email" value=""`.
 3. Act on refs: `browse click e5`, `browse fill e5 "text"`, `browse select e7 "Large"`.
    `browse press Enter` and `browse type "text"` act where the focus is.
-4. Each action waits for the page to settle and prints the tab, title, and URL.
-   Snapshot again after anything that changes the page.
+4. Each action waits for the page to settle and prints the tab, title, and URL,
+   then any uncaught error or failed request the page hit, which say why a
+   page misbehaves. Snapshot again after anything that changes the page.
 
-Read with `browse text` (or `browse text e12` for one element), `browse shot page.png`,
-or `browse eval "<js>"`.
+Read with `browse text` (or `browse text e12` for one element) or `browse eval "<js>"`.
+`browse shot page.png --refs` saves a screenshot with each element's ref drawn
+on it, when you can look at pictures.
 
 ## When the page answers
 

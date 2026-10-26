@@ -34,6 +34,7 @@ type Request struct {
 	Files  []string `json:"files,omitempty"`
 	Accept bool     `json:"accept,omitempty"`
 	Full   bool     `json:"full,omitempty"` // shot: the whole page, not just the viewport
+	Refs   bool     `json:"refs,omitempty"` // shot: label the elements with their refs
 	All    bool     `json:"all,omitempty"`  // text: no length limit
 	Step   int      `json:"step,omitempty"` // cycle: +1 for the next tab, -1 for the previous
 	View   *View    `json:"view,omitempty"` // stream: the viewer's page area
@@ -292,7 +293,7 @@ func dispatch(s *Session, req Request) (any, error) {
 	case "eval":
 		return s.Eval(req.Tab, req.JS)
 	case "screenshot":
-		return s.Screenshot(req.Tab, req.Full)
+		return s.Screenshot(req.Tab, req.Full, req.Refs)
 	case "close":
 		return s.Close(req.Tab)
 	case "cycle":

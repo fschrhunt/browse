@@ -207,3 +207,18 @@ func TestDrawRemovesWhatLeft(t *testing.T) {
 		t.Errorf("the start screen should remove the page: %q", out)
 	}
 }
+
+// Ctrl+C asks for the selection where the keyboard is, and the viewer puts
+// what comes back on the clipboard through the terminal.
+func TestCopyGoesToClipboard(t *testing.T) {
+	v, sent := testViewer()
+	v.frame = Frame{Tab: "t1"}
+	v.handle(keyPress{Key: "c", Ctrl: true})
+	if !reflect.DeepEqual(*sent, []Input{{Kind: "copy", To: "page"}}) {
+		t.Errorf("sent %+v", *sent)
+	}
+	v.frame.Copy = "hi"
+	if out := v.draw(v.frame); out != "" {
+		t.Errorf("draw should not write the clipboard itself: %q", out)
+	}
+}

@@ -368,3 +368,25 @@ func TestRemoteStreamSendsPartials(t *testing.T) {
 		}
 	}
 }
+
+// A copy asks the page for its selection, which the viewer puts on the
+// clipboard.
+func TestCopySendsSelection(t *testing.T) {
+	s, tab := newTestSession(t, map[string]string{"/": `<p id="p">copy me</p>`})
+	s.Eval(tab, `getSelection().selectAllChildren(document.getElementById('p'))`)
+	frames, inputs := startStream(t, s, testView)
+	nextFrame(t, frames, "page")
+
+	inputs <- Input{Kind: "copy", To: "page"}
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case f := <-frames:
+			if f.Copy == "copy me" {
+				return
+			}
+		case <-timeout:
+			t.Fatal("no frame carried the selection")
+		}
+	}
+}

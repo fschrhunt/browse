@@ -112,6 +112,27 @@ function describe(el, ref) {
   return d;
 }
 
+// label puts each snapshot ref on its element for a screenshot, or takes
+// the labels away again.
+function label(on) {
+  document.getElementById('__browse_labels')?.remove();
+  if (!on) return;
+  const layer = document.createElement('div');
+  layer.id = '__browse_labels';
+  layer.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:2147483647;font:bold 11px/1 monospace';
+  walk(document, (el) => {
+    const ref = el.getAttribute('data-browse-ref');
+    if (!ref || !visible(el)) return;
+    const box = el.getBoundingClientRect(), o = offset(el);
+    const tag = document.createElement('span');
+    tag.textContent = ref;
+    tag.style.cssText = 'position:absolute;background:#f97316;color:#fff;padding:2px 4px;border-radius:3px;white-space:nowrap;left:'
+      + Math.max(box.left + o.x + scrollX, 0) + 'px;top:' + Math.max(box.top + o.y + scrollY - 14, 0) + 'px';
+    layer.append(tag);
+  });
+  document.body.append(layer);
+}
+
 function snapshot(max) {
   const refs = {}, elements = [];
   let more = 0;

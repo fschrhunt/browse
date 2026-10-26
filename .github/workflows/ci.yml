@@ -36,3 +36,24 @@ jobs:
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
       - run: go test ./...
+
+  # Pictures of the browser in a real terminal, for eyes: the sheet is an
+  # artifact of every run. Nothing is compared automatically.
+  screens:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get install -y -qq kitty xvfb xdotool tmux imagemagick >/dev/null
+      - run: sh scripts/install.sh
+      - run: go build -o browse . && sh scripts/screens.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screens
+          path: dist/screens/
+          if-no-files-found: error
