@@ -137,6 +137,15 @@ func identity(chromePath string) *emulation.SetUserAgentOverrideParams {
 	}
 }
 
+// sandboxBlocked reports whether Linux keeps Chrome from making the user
+// namespaces its sandbox needs, as Ubuntu 23.10 and later do for programs
+// outside their own packages. Chrome will not start there with its sandbox,
+// so it runs without one, as Playwright runs Chrome everywhere.
+func sandboxBlocked() bool {
+	b, err := os.ReadFile("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+	return err == nil && strings.TrimSpace(string(b)) == "1"
+}
+
 // NewSession starts Chrome on profileDir. Cookies and logins are kept there, so
 // they survive restarts. Sites see an ordinary browser: no automation flags,
 // navigator.webdriver is false, and the user agent and client hints are
@@ -155,6 +164,9 @@ func NewSession(chromePath, profileDir string) (*Session, error) {
 		chromedp.Flag("enable-automation", false),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 	)
+	if sandboxBlocked() {
+		opts = append(opts, chromedp.NoSandbox)
+	}
 	ua := identity(chromePath)
 	if ua != nil {
 		// Also covers requests made before a tab gets its override, such as a
