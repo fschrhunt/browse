@@ -97,7 +97,6 @@ func TestClickWaitsForSlowNavigation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.cookieWait = 0
 	t.Cleanup(func() { s.Shutdown() })
 	info, err := s.Open(srv.URL)
 	if err != nil {

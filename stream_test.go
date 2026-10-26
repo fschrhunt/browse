@@ -390,3 +390,32 @@ func TestCopySendsSelection(t *testing.T) {
 		}
 	}
 }
+
+// A resize on a live stream brings pictures of every layer at the new size,
+// stamped with the viewer's new layout generation.
+func TestResizeFollowsTheTerminal(t *testing.T) {
+	s, _ := newTestSession(t, map[string]string{"/": `<title>One</title>`})
+	frames, inputs := startStream(t, s, testView)
+	pictures(t, frames, "page", "bar", "box")
+
+	bigger := testView
+	bigger.Cols, bigger.Rows = 60, 27
+	inputs <- Input{Kind: "resize", View: &bigger, Gen: 1}
+	got := map[string]Frame{}
+	timeout := time.After(10 * time.Second)
+	for len(got) < 3 {
+		select {
+		case f := <-frames:
+			if f.PNG != nil && f.Gen == 1 {
+				got[f.Layer] = f
+			}
+		case <-timeout:
+			t.Fatalf("no picture of the new size of every layer, got %d", len(got))
+		}
+	}
+	for layer, want := range map[string][2]int{"page": {480, 360}, "bar": {480, 45}, "box": {288, 45}} {
+		if w, h := pngSize(got[layer].PNG); w != want[0] || h != want[1] {
+			t.Errorf("%s picture is %dx%d, want %dx%d", layer, w, h, want[0], want[1])
+		}
+	}
+}

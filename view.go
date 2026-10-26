@@ -33,8 +33,10 @@ import (
 const (
 	probeTimeout = time.Second
 	doubleClick  = 400 * time.Millisecond
-	moveGap      = 30 * time.Millisecond // at most about 30 mouse moves a second
-	wheelStep    = 100                   // CSS pixels per wheel notch
+	moveGap      = 30 * time.Millisecond  // at most about 30 mouse moves a second
+	wheelStep    = 100                    // CSS pixels per wheel notch
+	resizeLull   = 50 * time.Millisecond  // a drag resizes many times; wait for a lull before relaying out...
+	resizeMost   = 200 * time.Millisecond // ...but no longer than this, so the page follows a long drag
 )
 
 // layout is the terminal's size and how pictures map onto it.
@@ -207,7 +209,9 @@ func (st *stream) close() { st.conn.Close() }
 type viewer struct {
 	p      painter
 	pixels bool
+	remote bool // the terminal is across a network
 	lay    layout
+	gen    int // the layout's generation, which pictures must be for
 	caps   caps
 	st     *stream
 	send   func(Input) // delivers an input to the daemon
@@ -273,7 +277,7 @@ func runViewer() error {
 		}
 	}()
 
-	v := &viewer{p: painter{tmux: inTmux}}
+	v := &viewer{p: painter{tmux: inTmux}, remote: remote}
 	v.caps = probe(v.p, in)
 	if !v.caps.graphics {
 		return errors.New("this terminal cannot show images; browse needs one with kitty graphics, such as kitty, Ghostty, or WezTerm")
@@ -293,39 +297,36 @@ func runViewer() error {
 	signal.Notify(resized, syscall.SIGWINCH)
 	defer signal.Stop(resized)
 
-	var parser inputParser
-	for {
-		v.lay, err = measure(v.caps.cellW, v.caps.cellH, remote)
-		if err != nil {
-			return err
-		}
-		v.lay.tmux = inTmux
-		v.st, err = openStream(v.lay.view(v.caps, remote))
-		if err != nil {
-			return err
-		}
-		v.send = v.st.send
-		fmt.Print("\x1b[2J")
-		v.cells = ""
-		quit, err := v.loop(in, resized, &parser)
-		v.st.close()
-		if quit || err != nil {
-			return err
-		}
+	v.lay, err = measure(v.caps.cellW, v.caps.cellH, remote)
+	if err != nil {
+		return err
 	}
+	v.lay.tmux = inTmux
+	v.st, err = openStream(v.lay.view(v.caps, remote))
+	if err != nil {
+		return err
+	}
+	defer v.st.close()
+	v.send = v.st.send
+	fmt.Print("\x1b[2J")
+	var parser inputParser
+	return v.loop(in, resized, &parser)
 }
 
-// loop draws frames and handles input until the terminal is resized, which
-// returns (false, nil), or the viewer should end.
-func (v *viewer) loop(in <-chan []byte, resized <-chan os.Signal, parser *inputParser) (bool, error) {
+// loop draws frames and handles input until the viewer should end: the
+// person quits, every tab is closed, or the browser stops.
+func (v *viewer) loop(in <-chan []byte, resized <-chan os.Signal, parser *inputParser) error {
 	for {
 		select {
 		case f, ok := <-v.st.frames:
 			if !ok {
-				return true, errors.New("the browser stopped")
+				return errors.New("the browser stopped")
 			}
 			if f.Tab == "" {
-				return true, nil
+				return nil
+			}
+			if f.PNG != nil && f.Gen != v.gen {
+				continue // a picture for the layout before a resize
 			}
 			v.frame = f
 			out := v.draw(f)
@@ -336,17 +337,53 @@ func (v *viewer) loop(in <-chan []byte, resized <-chan os.Signal, parser *inputP
 			fmt.Print(out)
 		case b, ok := <-in:
 			if !ok {
-				return true, nil
+				return nil
 			}
 			for _, ev := range parser.feed(b) {
 				if v.handle(ev) {
-					return true, nil
+					return nil
 				}
 			}
 		case <-resized:
-			return false, nil
+			// Dragging a pane's edge resizes the terminal many times a second;
+			// wait for a lull before measuring, but not longer than resizeMost,
+			// so the page follows a long drag.
+			lull, most := time.NewTimer(resizeLull), time.After(resizeMost)
+		wait:
+			for {
+				select {
+				case <-resized:
+					lull.Reset(resizeLull)
+				case <-lull.C:
+					break wait
+				case <-most:
+					break wait
+				}
+			}
+			// A terminal too small to show the browser keeps the layout it had
+			// until it grows again.
+			if lay, err := measure(v.caps.cellW, v.caps.cellH, v.remote); err == nil {
+				lay.tmux = v.lay.tmux
+				fmt.Print(v.relayout(lay))
+			}
 		}
 	}
+}
+
+// relayout takes the terminal's new layout: the daemon is asked for pictures
+// of the new size on the same stream, and pictures of the old size are
+// dropped until they come. What is on screen stays where it is until then.
+// It returns what to print.
+func (v *viewer) relayout(lay layout) string {
+	if lay == v.lay {
+		return ""
+	}
+	v.lay = lay
+	v.gen++
+	v.cells = "" // tmux's cells are given out anew
+	view := v.lay.view(v.caps, v.remote)
+	v.send(Input{Kind: "resize", View: &view, Gen: v.gen})
+	return v.clearParts()
 }
 
 // draw places a frame's picture: the page under the bar, the bar at the

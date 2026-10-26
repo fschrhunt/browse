@@ -89,8 +89,8 @@ func (s *Session) openedAfter(n int) []string {
 }
 
 // read runs fn on a tab under its lock and returns fn's error.
-func (s *Session) read(id string, acts bool, fn func(ctx context.Context, t *tab) error) error {
-	t, err := s.use(id, acts)
+func (s *Session) read(id string, fn func(ctx context.Context, t *tab) error) error {
+	t, err := s.use(id)
 	if err != nil {
 		return err
 	}
@@ -113,8 +113,8 @@ func (s *Session) read(id string, acts bool, fn func(ctx context.Context, t *tab
 // act runs an action on a tab under its lock, waits for the page to settle, and
 // reports where the browser ended up. A confirm or prompt that the action
 // opened is reported in the result, since the action itself happened.
-func (s *Session) act(id string, acts bool, fn func(ctx context.Context) error) (TabInfo, error) {
-	t, err := s.use(id, acts)
+func (s *Session) act(id string, fn func(ctx context.Context) error) (TabInfo, error) {
+	t, err := s.use(id)
 	if err != nil {
 		return TabInfo{}, err
 	}
@@ -239,28 +239,28 @@ func locateSpot(ctx context.Context, ref string) (spot, error) {
 
 // Goto loads url in the tab.
 func (s *Session) Goto(id, rawURL string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		return chromedp.Do(ctx, chromedp.Navigate(resolveURL(rawURL)))
 	})
 }
 
 // Back, Forward, and Reload move through the tab's history.
 func (s *Session) Back(id string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error { return chromedp.Do(ctx, chromedp.NavigateBack()) })
+	return s.act(id, func(ctx context.Context) error { return chromedp.Do(ctx, chromedp.NavigateBack()) })
 }
 
 func (s *Session) Forward(id string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error { return chromedp.Do(ctx, chromedp.NavigateForward()) })
+	return s.act(id, func(ctx context.Context) error { return chromedp.Do(ctx, chromedp.NavigateForward()) })
 }
 
 func (s *Session) Reload(id string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error { return chromedp.Do(ctx, chromedp.Reload()) })
+	return s.act(id, func(ctx context.Context) error { return chromedp.Do(ctx, chromedp.Reload()) })
 }
 
 // Stop stops the tab's page loading. It skips the tab's lock, since what it
 // stops is usually an action holding it.
 func (s *Session) Stop(id string) (TabInfo, error) {
-	t, err := s.use(id, false)
+	t, err := s.use(id)
 	if err != nil {
 		return TabInfo{}, err
 	}
@@ -273,7 +273,7 @@ func (s *Session) Stop(id string) (TabInfo, error) {
 // Click clicks the element with a real mouse event at its center, as a person
 // would, so whatever is on top at that point gets the click.
 func (s *Session) Click(id, ref string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		p, err := locateSpot(ctx, ref)
 		if err != nil {
 			return err
@@ -284,7 +284,7 @@ func (s *Session) Click(id, ref string) (TabInfo, error) {
 
 // Hover moves the mouse over the element, which opens hover menus.
 func (s *Session) Hover(id, ref string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		p, err := locateSpot(ctx, ref)
 		if err != nil {
 			return err
@@ -297,7 +297,7 @@ func (s *Session) Hover(id, ref string) (TabInfo, error) {
 // text goes in through Chrome's text input, so frameworks and rich editors see
 // a real edit.
 func (s *Session) Fill(id, ref, text string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		status, err := chromedp.Run(ctx, chromedp.Evaluate[string](pageCall("focusField", ref)))
 		switch {
 		case err != nil:
@@ -317,7 +317,7 @@ func (s *Session) Fill(id, ref, text string) (TabInfo, error) {
 
 // Type inserts text where the focus is, without clearing anything.
 func (s *Session) Type(id, text string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		_, err := chromedp.Call(ctx, input.InsertText, input.InsertTextParams{Text: text})
 		return err
 	})
@@ -370,7 +370,7 @@ func (s *Session) Press(id, spec string) (TabInfo, error) {
 	if err != nil {
 		return TabInfo{}, err
 	}
-	return s.act(id, true, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		return chromedp.Do(ctx, chromedp.KeyEvent(key, chromedp.KeyModifiers(mods...)))
 	})
 }
@@ -383,7 +383,7 @@ type chosen struct {
 
 // Select picks an option of a select element by its value or visible text.
 func (s *Session) Select(id, ref, choice string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		c, err := chromedp.Run(ctx, chromedp.Evaluate[chosen](pageCall("choose", ref, choice)))
 		switch {
 		case err != nil:
@@ -401,7 +401,7 @@ func (s *Session) Select(id, ref, choice string) (TabInfo, error) {
 // bottom, or until the element with a ref is in view. Down and up use the
 // mouse wheel at the middle of the page, so inner scrolling panes move too.
 func (s *Session) Scroll(id, where string) (TabInfo, error) {
-	return s.act(id, true, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		switch where {
 		case "", "down", "up":
 			delta := float64(viewportHeight) * 0.8
@@ -431,7 +431,7 @@ func (s *Session) Upload(id, ref string, files []string) (TabInfo, error) {
 		}
 		paths[i] = abs
 	}
-	return s.act(id, true, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		el, err := chromedp.Run(ctx, chromedp.Evaluate[*runtime.RemoteObject](pageCall("locate", ref)))
 		if err != nil {
 			return err
@@ -446,7 +446,7 @@ func (s *Session) Upload(id, ref string, files []string) (TabInfo, error) {
 
 // Wait waits for a duration like 2s, or until text appears on the page.
 func (s *Session) Wait(id, what string) (TabInfo, error) {
-	return s.act(id, false, func(ctx context.Context) error {
+	return s.act(id, func(ctx context.Context) error {
 		if d, err := time.ParseDuration(what); err == nil {
 			select {
 			case <-ctx.Done():
@@ -474,7 +474,7 @@ func (s *Session) Wait(id, what string) (TabInfo, error) {
 
 // Dialog accepts or dismisses the tab's open confirm or prompt. text answers a prompt.
 func (s *Session) Dialog(id string, accept bool, text string) (TabInfo, error) {
-	t, err := s.use(id, true)
+	t, err := s.use(id)
 	if err != nil {
 		return TabInfo{}, err
 	}
@@ -490,13 +490,13 @@ func (s *Session) Dialog(id string, accept bool, text string) (TabInfo, error) {
 	t.dialog = nil
 	t.state.Unlock()
 	// Settle, since answering may navigate.
-	return s.act(t.id, false, func(context.Context) error { return nil })
+	return s.act(t.id, func(context.Context) error { return nil })
 }
 
 // Snapshot tags the page's elements and returns them with their refs.
 func (s *Session) Snapshot(id string) (Snapshot, error) {
 	var snap Snapshot
-	err := s.read(id, false, func(ctx context.Context, t *tab) error {
+	err := s.read(id, func(ctx context.Context, t *tab) error {
 		var err error
 		snap, err = chromedp.Run(ctx, chromedp.Evaluate[Snapshot](pageCall("snapshot", snapshotLimit)))
 		snap.Tab = t.id
@@ -521,7 +521,7 @@ func (s *Session) Text(id, ref string, all bool) (Text, error) {
 		limit = 0
 	}
 	var res textResult
-	err := s.read(id, false, func(ctx context.Context, t *tab) error {
+	err := s.read(id, func(ctx context.Context, t *tab) error {
 		var err error
 		res, err = chromedp.Run(ctx, chromedp.Evaluate[textResult](pageCall("textOf", ref, limit)))
 		if err == nil && res.Missing {
@@ -536,7 +536,7 @@ func (s *Session) Text(id, ref string, all bool) (Text, error) {
 // promise is awaited, so fetch(...).then(...) returns its final value.
 func (s *Session) Eval(id, js string) (any, error) {
 	var value any
-	err := s.read(id, true, func(ctx context.Context, t *tab) error {
+	err := s.read(id, func(ctx context.Context, t *tab) error {
 		var err error
 		value, err = chromedp.Run(ctx, chromedp.Evaluate[any](js, chromedp.EvalAwaitPromise))
 		return err
@@ -548,7 +548,7 @@ func (s *Session) Eval(id, js string) (any, error) {
 // It does not wait for the tab's lock, so a viewer keeps drawing while an
 // action runs.
 func (s *Session) Screenshot(id string, full, refs bool) (Shot, error) {
-	t, err := s.use(id, false)
+	t, err := s.use(id)
 	if err != nil {
 		return Shot{}, err
 	}

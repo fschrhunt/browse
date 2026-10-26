@@ -96,16 +96,18 @@ func (v View) dark() bool {
 // Frame is one update for a viewer. A frame with a PNG is a picture of one
 // Layer: "page", "bar", or "box". A page picture with Partial set is only
 // the part of the page that changed, to be placed X, Y device pixels from
-// the page's top left over what is there. Every frame carries the state the
-// viewer routes by: the active tab (none means every tab is closed), whether
-// the box holds the keyboard, and whether the tab is blank, which shows the
-// start screen: the box over nothing.
+// the page's top left over what is there. Gen is the generation of the
+// viewer's layout a picture is sized for, from its last resize. Every frame
+// carries the state the viewer routes by: the active tab (none means every
+// tab is closed), whether the box holds the keyboard, and whether the tab is
+// blank, which shows the start screen: the box over nothing.
 type Frame struct {
 	Layer   string `json:"layer,omitempty"`
 	PNG     []byte `json:"png,omitempty"`
 	Partial bool   `json:"partial,omitempty"`
 	X       int    `json:"x,omitempty"`
 	Y       int    `json:"y,omitempty"`
+	Gen     int    `json:"gen,omitempty"`
 	Tab     string `json:"tab"`
 	Editing bool   `json:"editing"`
 	Start   bool   `json:"start"`
@@ -114,7 +116,7 @@ type Frame struct {
 
 // markAgent records that an agent is acting on a tab, for the viewer's bar.
 func (s *Session) markAgent(id string) {
-	t, err := s.use(id, false)
+	t, err := s.use(id)
 	if err != nil {
 		return
 	}
@@ -152,13 +154,14 @@ func (s *Session) Cycle(step int) (TabInfo, error) {
 
 // Stream sends frames to a viewer until ctx ends: pictures of the active tab,
 // following it as it changes, pictures of the bar and the box, and the state
-// the viewer routes input by. Inputs from the viewer arrive on in. Pictures
+// the viewer routes input by. Inputs from the viewer arrive on in; a resize
+// among them brings pictures of the new size on the same stream. Pictures
 // come from Chrome's screencast, which only produces one when something
 // changes, so an idle page costs nothing.
 func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error, in <-chan Input) error {
 	var (
 		shown    *tab
-		stopPage = func() {}
+		stopPage = func(bool) {}
 		pngs     = map[string]chan []byte{"page": make(chan []byte, 1), "bar": make(chan []byte, 1), "box": make(chan []byte, 1)}
 		sent     = map[string]time.Time{}
 		editing  atomic.Bool
@@ -167,11 +170,14 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error,
 		noteAt   time.Time
 		box      *iface
 		pageDiff *differ // across a network, only what changed goes
+		gen      int     // the viewer's layout generation the pictures are for
+		boxShown bool    // the viewer has the box on screen
+		ready    bool    // the first pictures have gone
 	)
 	if view.Remote && view.Parts {
 		pageDiff = &differ{}
 	}
-	defer func() { stopPage() }()
+	defer func() { stopPage(true) }()
 
 	// The interface asks the session for things on the person's behalf.
 	act := func(m uiMessage) {
@@ -218,25 +224,31 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error,
 			}
 		}()
 	}
-	screenW, _ := view.screen()
-	bar, err := s.openInterface(view, "bar", screenW, int(view.barHeight()), act)
+	bar, err := s.openInterface(view, "bar", act)
 	if err != nil {
 		return err
 	}
 	defer bar.close()
-	_, _, boxW, boxH := view.boxPx()
-	box, err = s.openInterface(view, "box", int(boxW), int(boxH), act)
+	box, err = s.openInterface(view, "box", act)
 	if err != nil {
 		return err
 	}
 	defer box.close()
-	defer cast(bar.ctx, screenW, int(view.barHeight()), view.Scale, pngs["bar"])()
-	defer cast(box.ctx, int(boxW), int(boxH), view.Scale, pngs["box"])()
-
-	gap := pageGap
-	if view.Remote {
-		gap = remoteGap
+	// fit sizes the bar and the box to the view and streams their pictures;
+	// the returned func stops the pictures.
+	fit := func() func() {
+		screenW, _ := view.screen()
+		barH := int(view.barHeight())
+		_, _, boxW, boxH := view.boxPx()
+		bar.resize(screenW, barH, view.Scale)
+		box.resize(int(boxW), int(boxH), view.Scale)
+		stopBar := cast(bar.ctx, screenW, barH, view.Scale, pngs["bar"])
+		stopBox := cast(box.ctx, int(boxW), int(boxH), view.Scale, pngs["box"])
+		return func() { stopBar(); stopBox() }
 	}
+	stopUI := fit()
+	defer func() { stopUI() }()
+
 	tick := time.NewTicker(stateEvery)
 	defer tick.Stop()
 	for {
@@ -245,7 +257,7 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error,
 			return send(Frame{})
 		}
 		if t != shown {
-			stopPage()
+			stopPage(true)
 			if shown != nil && editing.Load() {
 				box.blur() // the box was for the tab just left
 			}
@@ -265,8 +277,27 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error,
 		if start && !editing.Load() {
 			box.edit("") // the start screen is the box, so it has the keyboard
 		}
+		if show := start || editing.Load(); show != boxShown {
+			boxShown = show
+			if show {
+				box.pop() // the box comes on screen
+			}
+		}
+		if !ready {
+			// The first pictures go together, so the interface appears whole,
+			// not in pieces.
+			ready = true
+			deadline := time.Now().Add(time.Second)
+			for len(pngs["page"])+len(pngs["bar"])+len(pngs["box"]) < 3 && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
 
-		f := Frame{Tab: t.id, Start: start, Editing: editing.Load()}
+		gap := pageGap
+		if view.Remote {
+			gap = remoteGap
+		}
+		f := Frame{Tab: t.id, Start: start, Editing: editing.Load(), Gen: gen}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -289,6 +320,17 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error,
 		case input, ok := <-in:
 			if !ok {
 				return nil
+			}
+			if input.Kind == "resize" && input.View != nil {
+				// The terminal changed size: the interface and the page are
+				// sized again where they are, and their pictures start over.
+				view, gen = *input.View, input.Gen
+				stopUI()
+				stopUI = fit()
+				stopPage(false)
+				stopPage = func(bool) {}
+				shown = nil // shows the page again, at the new size
+				continue
 			}
 			if copied := s.route(input, t, bar, box); copied != "" {
 				f.Copy = copied
@@ -392,11 +434,12 @@ func history(t *tab) (back, forward bool) {
 }
 
 // show sizes t's page to the view's page area and sends its pictures to out
-// until the returned func is called, which restores the default size. Each
-// time a document first paints content or finishes loading, a fresh picture
-// follows too, since the screencast sends none of some pages, such as
+// until the returned func is called, which restores the default size when
+// asked to; a page about to be shown again, at a new size, keeps its size.
+// Each time a document first paints content or finishes loading, a fresh
+// picture follows too, since the screencast sends none of some pages, such as
 // Chrome's error pages.
-func (t *tab) show(view View, out chan []byte) func() {
+func (t *tab) show(view View, out chan []byte) func(restore bool) {
 	w, h := view.page()
 	chromedp.Run(t.ctx, chromedp.EmulateViewport(int64(w), int64(h), chromedp.EmulateScale(view.Scale)))
 	scheme := "light"
@@ -427,11 +470,13 @@ func (t *tab) show(view View, out chan []byte) func() {
 			}
 		}
 	}()
-	return func() {
+	return func(restore bool) {
 		cancel()
 		stop()
-		chromedp.Run(t.ctx, chromedp.EmulateViewport(viewportWidth, viewportHeight))
-		chromedp.Call(t.ctx, emulation.SetEmulatedMedia, emulation.SetEmulatedMediaParams{})
+		if restore {
+			chromedp.Run(t.ctx, chromedp.EmulateViewport(viewportWidth, viewportHeight))
+			chromedp.Call(t.ctx, emulation.SetEmulatedMedia, emulation.SetEmulatedMediaParams{})
+		}
 	}
 }
 
@@ -477,13 +522,16 @@ func put(out chan []byte, png []byte) {
 // Input is one piece of a person's input. Kind is "mouse", "key", or "text",
 // for the page unless To says "bar" or "box"; "copy" asks for the selection
 // there; "edit" puts the tab's address in the box and gives it the keyboard,
-// and "blur" takes the keyboard back.
+// and "blur" takes the keyboard back. "resize" says the terminal is now View,
+// and the pictures for it carry Gen.
 // Mouse coordinates are CSS pixels from the top left of what they are for.
 // Key is a single character or a key name such as Enter, with Modifiers like
 // Control.
 type Input struct {
 	Kind      string   `json:"kind"`
 	To        string   `json:"to,omitempty"`
+	View      *View    `json:"view,omitempty"`
+	Gen       int      `json:"gen,omitempty"`
 	Type      string   `json:"type,omitempty"` // mousePressed, mouseReleased, mouseMoved, mouseWheel
 	X         float64  `json:"x,omitempty"`
 	Y         float64  `json:"y,omitempty"`

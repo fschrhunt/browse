@@ -88,10 +88,10 @@ type backgroundParams struct {
 
 var setBackground = cdp.Command[backgroundParams, cdp.Empty]{Method: emulation.CommandSetDefaultBackgroundColorOverride}
 
-// openInterface opens one part of the interface, "bar" or "box", w x h CSS
-// pixels large, for a viewer of view. What the person asks for in it goes to
-// act. It is transparent where it draws nothing, so the page shows through.
-func (s *Session) openInterface(view View, part string, w, h int, act func(uiMessage)) (*iface, error) {
+// openInterface opens one part of the interface, "bar" or "box", for a viewer
+// of view; resize then gives it its size. What the person asks for in it goes
+// to act. It is transparent where it draws nothing, so the page shows through.
+func (s *Session) openInterface(view View, part string, act func(uiMessage)) (*iface, error) {
 	ctx, cancel := chromedp.NewContext(s.anchor)
 	u := &iface{ctx: ctx, cancel: cancel}
 	fail := func(err error) (*iface, error) {
@@ -99,9 +99,6 @@ func (s *Session) openInterface(view View, part string, w, h int, act func(uiMes
 		return nil, err
 	}
 	if _, err := chromedp.Run(ctx, chromedp.Navigate("data:text/html;base64,"+base64.StdEncoding.EncodeToString(uiHTML))); err != nil {
-		return fail(err)
-	}
-	if _, err := chromedp.Run(ctx, chromedp.EmulateViewport(int64(w), int64(h), chromedp.EmulateScale(view.Scale))); err != nil {
 		return fail(err)
 	}
 	if _, err := chromedp.Call(ctx, setBackground, backgroundParams{Color: rgba{0, 0, 0, 0}}); err != nil {
@@ -128,10 +125,23 @@ func (s *Session) openInterface(view View, part string, w, h int, act func(uiMes
 	if _, err := chromedp.Run(ctx, chromedp.Evaluate[any]("ui.update("+string(setup)+")")); err != nil {
 		return fail(err)
 	}
-	// A new tab's mouse sits at its top left, which would count as hovering
-	// the bar; the bar's last pixel row is kept clear for the mouse to rest on.
-	dispatchInput(ctx, Input{Kind: "mouse", Type: "mouseMoved", X: 0, Y: float64(h) - 0.5})
 	return u, nil
+}
+
+// resize makes the part w x h CSS pixels at scale, and rests the mouse on
+// the clear strip at its bottom: a new tab's mouse sits at its top left, and
+// a taller part can leave it on the bar, either of which would count as
+// hovering.
+func (u *iface) resize(w, h int, scale float64) error {
+	if _, err := chromedp.Run(u.ctx, chromedp.EmulateViewport(int64(w), int64(h), chromedp.EmulateScale(scale))); err != nil {
+		return err
+	}
+	return dispatchInput(u.ctx, Input{Kind: "mouse", Type: "mouseMoved", X: 0, Y: float64(h) - 0.5})
+}
+
+// pop brings the box on, with its half bounce, from the start each time.
+func (u *iface) pop() {
+	chromedp.Run(u.ctx, chromedp.Evaluate[any]("ui.pop()"))
 }
 
 // update pushes the state to the interface when it changed.

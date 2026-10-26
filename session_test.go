@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 // testChrome returns the headless shell, or skips the test when none is installed.
@@ -19,8 +18,7 @@ func testChrome(t *testing.T) string {
 }
 
 // newTestSession serves pages, keyed by path, from a local server, and opens
-// "/" in a browser with a throwaway profile. It skips the cookie wait, since
-// these tests do not check persistence.
+// "/" in a browser with a throwaway profile.
 func newTestSession(t *testing.T, pages map[string]string) (*Session, string) {
 	t.Helper()
 	chrome := testChrome(t)
@@ -39,7 +37,6 @@ func newTestSession(t *testing.T, pages map[string]string) (*Session, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.cookieWait = 0
 	t.Cleanup(func() { s.Shutdown() })
 	info, err := s.Open(srv.URL + "/")
 	if err != nil {
@@ -59,36 +56,11 @@ func evalString(t *testing.T, s *Session, tab, js string) string {
 	return str
 }
 
-// While Shutdown waits for cookies to be written, other commands fail at once
-// instead of queueing behind it.
-func TestCommandsFailFastDuringShutdown(t *testing.T) {
-	s, tab := newTestSession(t, map[string]string{"/": `<p>x</p>`})
-	s.cookieWait = time.Second
-	s.Eval(tab, "1") // an action, so Shutdown waits
-	done := make(chan error)
-	go func() { done <- s.Shutdown() }()
-	time.Sleep(100 * time.Millisecond)
-
-	start := time.Now()
-	_, err := s.Text(tab, "", false)
-	if err == nil || !strings.Contains(err.Error(), "shutting down") {
-		t.Errorf("want a shutting down error, got %v", err)
-	}
-	if waited := time.Since(start); waited > 500*time.Millisecond {
-		t.Errorf("command waited %v for shutdown", waited)
-	}
-	if err := <-done; err != nil {
-		t.Errorf("shutdown: %v", err)
-	}
-}
-
 // Logins live in the profile, so a session started later on the same profile
-// still has the cookie that an earlier session got. The server sets the cookie
+// still has the cookie that an earlier session got, even when the first
+// session is shut down right after getting it. The server sets the cookie
 // only on /set, so the check on /check can only see it if the profile kept it.
 func TestCookiesPersistAcrossSessions(t *testing.T) {
-	if testing.Short() {
-		t.Skip("shutdown waits for cookies to be written, which takes about 30 seconds")
-	}
 	chrome := testChrome(t)
 	profile := t.TempDir()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +86,6 @@ func TestCookiesPersistAcrossSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second.cookieWait = 0
 	t.Cleanup(func() { second.Shutdown() })
 	info, err := second.Open(srv.URL + "/check")
 	if err != nil {

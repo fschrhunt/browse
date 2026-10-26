@@ -1,2 +1,4 @@
 /browse
 /dist/
+config.bat
+node_modules

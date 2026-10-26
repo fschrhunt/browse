@@ -2,11 +2,12 @@
 <!--
 The interface: the bar and the address box, drawn by Chrome in two hidden
 tabs, each sized to its part, and shown by the viewer over the page. The
-daemon calls ui.update(state) with what to show, ui.edit(text) to open the
-box, and ui.leave() when the mouse leaves the bar; the page answers through
-the browse(message) binding with what the person did. Everything else, the
-mouse and keys, arrives as real input events from the viewer. Colors come
-from the terminal's theme, so the interface fits light and dark alike.
+daemon calls ui.update(state) with what to show, ui.edit(text) to give the
+box text and the keyboard, ui.blur() to take the keyboard back, and ui.pop()
+when the box comes on screen; the page answers through the browse(message)
+binding with what the person did. Everything else, the mouse and keys,
+arrives as real input events from the viewer. Colors come from the terminal's
+theme, so the interface fits light and dark alike.
 -->
 <meta charset="utf-8">
 <style>
@@ -53,10 +54,18 @@ from the terminal's theme, so the interface fits light and dark alike.
   body.loading .load { display: block; }
   @keyframes slide { from { left: -25% } to { left: 100% } }
 
-  /* The box fills its tab: a rounded rectangle with the page showing past its corners. */
+  /* The box fills its tab: a rounded rectangle with the page showing past its
+     corners. It is clear until ui.pop() brings it on with a half bounce: it
+     grows in, overshoots a little once, and settles. */
   .box { position: absolute; inset: 0; border-radius: 12px; box-sizing: border-box; padding: 0 16px;
-         background: color-mix(in srgb, var(--fg) 8%, var(--bg)); border: 1px solid var(--line); }
+         background: color-mix(in srgb, var(--fg) 8%, var(--bg)); border: 1px solid var(--line); opacity: 0; }
   body[data-part=box] .box { display: flex; align-items: center; }
+  .box.in { animation: pop .2s ease-out both; }
+  @keyframes pop {
+    from { transform: scale(.94); opacity: 0 }
+    60% { transform: scale(1.015); opacity: 1 }
+    to { transform: scale(1); opacity: 1 }
+  }
   .box input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; padding: 0; color: var(--fg);
                font: 15px var(--mono); caret-color: var(--fg); }
   .box input::placeholder { color: var(--dim); }
@@ -130,6 +139,14 @@ function blur() {
   send({ t: 'editing', on: false });
 }
 
+// ui.pop brings the box on with its half bounce, from the start each time.
+function pop() {
+  const box = $('.box');
+  box.classList.remove('in');
+  void box.offsetWidth; // a reflow, so the animation starts over
+  box.classList.add('in');
+}
+
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-close], [data-tab], [data-do]');
   if (!t) return;
@@ -153,5 +170,5 @@ $('.box input').addEventListener('keydown', e => {
   }
 });
 
-window.ui = { update, edit, blur };
+window.ui = { update, edit, blur, pop };
 </script>

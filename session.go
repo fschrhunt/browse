@@ -37,13 +37,6 @@ const (
 	viewportWidth  = 1280
 	viewportHeight = 800
 	commandTimeout = 30 * time.Second
-
-	// Chrome writes cookies to the profile about 30 seconds after a change, and
-	// closing a headless shell does not write them sooner. Shutdown waits until
-	// this long after the last action that could change cookies, so the last
-	// logins are on disk. TestCookiesPersistAcrossSessions pins this behavior
-	// for the Chrome version that scripts/install.sh installs.
-	defaultCookieWait = 31 * time.Second
 )
 
 var errStopping = errors.New("browser is shutting down")
@@ -77,16 +70,12 @@ type Session struct {
 	anchor context.Context
 	// identity is applied to every tab; nil keeps Chrome's own.
 	identity *emulation.SetUserAgentOverrideParams
-	// cookieWait is how long after the last action Shutdown waits. Tests that do
-	// not check persistence set it to zero.
-	cookieWait time.Duration
 
 	mu       sync.Mutex
 	tabs     map[string]*tab
 	order    []string // tab ids, oldest first
 	nextID   int
 	active   string
-	lastAct  time.Time // when a command last could have changed cookies
 	stopping bool
 }
 
@@ -193,11 +182,10 @@ func NewSession(chromePath, profileDir string) (*Session, error) {
 	}
 
 	s := &Session{
-		allocEnd:   allocEnd,
-		anchor:     anchor,
-		identity:   ua,
-		cookieWait: defaultCookieWait,
-		tabs:       map[string]*tab{},
+		allocEnd: allocEnd,
+		anchor:   anchor,
+		identity: ua,
+		tabs:     map[string]*tab{},
 	}
 	go s.watchOpened()
 	go s.watchClosed()
@@ -451,17 +439,13 @@ func (t *tab) begin() (context.Context, func()) {
 	}
 }
 
-// use finds the tab for a command, or the active tab when id is empty. acts
-// marks commands that can change cookies, which Shutdown waits on. It fails
-// once shutdown has begun.
-func (s *Session) use(id string, acts bool) (*tab, error) {
+// use finds the tab for a command, or the active tab when id is empty. It
+// fails once shutdown has begun.
+func (s *Session) use(id string) (*tab, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopping {
 		return nil, errStopping
-	}
-	if acts {
-		s.lastAct = time.Now()
 	}
 	id = cmp.Or(id, s.active)
 	if id == "" {
@@ -519,7 +503,7 @@ func resolveURL(raw string) string {
 
 // Activate makes a tab the active one, which viewers show.
 func (s *Session) Activate(id string) (TabInfo, error) {
-	t, err := s.use(id, false)
+	t, err := s.use(id)
 	if err != nil {
 		return TabInfo{}, err
 	}
@@ -533,7 +517,6 @@ func (s *Session) Activate(id string) (TabInfo, error) {
 func (s *Session) Open(rawURL string) (TabInfo, error) {
 	s.mu.Lock()
 	stopping := s.stopping
-	s.lastAct = time.Now()
 	s.mu.Unlock()
 	if stopping {
 		return TabInfo{}, errStopping
@@ -546,7 +529,7 @@ func (s *Session) Open(rawURL string) (TabInfo, error) {
 	}
 	// Register before loading, so a dialog during the load is watched.
 	t := s.register(ctx, cancel)
-	return s.act(t.id, true, func(ctx context.Context) error {
+	return s.act(t.id, func(ctx context.Context) error {
 		return chromedp.Do(ctx, chromedp.Navigate(resolveURL(rawURL)))
 	})
 }
@@ -577,7 +560,7 @@ func (s *Session) List() ([]TabInfo, error) {
 
 // Close closes a tab. If it was active, the newest remaining tab becomes active.
 func (s *Session) Close(tabID string) (string, error) {
-	t, err := s.use(tabID, false)
+	t, err := s.use(tabID)
 	if err != nil {
 		return "", err
 	}
@@ -588,8 +571,11 @@ func (s *Session) Close(tabID string) (string, error) {
 	return t.id, nil
 }
 
-// Shutdown stops Chrome once the last cookie changes are on disk. New commands
-// fail as soon as it starts, so the wait does not hold up other callers.
+// Shutdown closes Chrome and returns once it has exited. New commands fail as
+// soon as it starts. The close is Chrome's own, graceful one, which writes the
+// cookies and storage still in memory to the profile first, so the last
+// logins are on disk; TestCookiesPersistAcrossSessions pins that for the
+// Chrome version scripts/install.sh installs.
 func (s *Session) Shutdown() error {
 	s.mu.Lock()
 	if s.stopping {
@@ -597,22 +583,16 @@ func (s *Session) Shutdown() error {
 		return errors.New("browser is already shutting down")
 	}
 	s.stopping = true
-	var wait time.Duration
-	if !s.lastAct.IsZero() {
-		wait = s.cookieWait - time.Since(s.lastAct)
-	}
 	tabs := make([]*tab, 0, len(s.tabs))
 	for _, t := range s.tabs {
 		tabs = append(tabs, t)
 	}
 	s.mu.Unlock()
 
-	time.Sleep(wait) // returns at once when wait <= 0
-
 	for _, t := range tabs {
 		t.cancel()
 	}
-	// Cancelling the anchor asks Chrome to exit cleanly.
+	// Cancelling the anchor asks Chrome to exit cleanly and waits until it has.
 	err := chromedp.Cancel(s.anchor)
 	s.allocEnd()
 	return err

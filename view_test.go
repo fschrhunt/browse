@@ -208,6 +208,24 @@ func TestDrawRemovesWhatLeft(t *testing.T) {
 	}
 }
 
+// A new terminal size asks the daemon for pictures of it, once, and until
+// they come, pictures of the old size are not drawn.
+func TestRelayoutAsksForTheNewSize(t *testing.T) {
+	v, sent := testViewer()
+	if out := v.relayout(v.lay); out != "" || len(*sent) != 0 {
+		t.Fatalf("the same layout again sent %+v", *sent)
+	}
+	bigger := v.lay
+	bigger.cols = 120
+	v.relayout(bigger)
+	if len(*sent) != 1 || (*sent)[0].Kind != "resize" || (*sent)[0].Gen != 1 || (*sent)[0].View.Cols != 120 {
+		t.Fatalf("sent %+v, want one resize to 120 columns at generation 1", *sent)
+	}
+	if v.lay != bigger {
+		t.Error("the viewer should draw with the new layout")
+	}
+}
+
 // Ctrl+C asks for the selection where the keyboard is, and the viewer puts
 // what comes back on the clipboard through the terminal.
 func TestCopyGoesToClipboard(t *testing.T) {
