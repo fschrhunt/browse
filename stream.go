@@ -25,8 +25,8 @@ const (
 // Frame is one update for a viewer: the bar's contents, and a picture of the
 // active tab when it changed. A frame without a Tab means every tab is
 // closed. Back and Forward say whether the tab's history goes that way.
-// Loading is set while the page loads, and Agent while an agent is acting on
-// the tab. Tabs lists every open tab, in order, for the bar.
+// Loading is set while the page loads or an action on it, such as going to
+// an address, is still running, and Agent while an agent is acting on the tab. Tabs lists every open tab, in order, for the bar.
 type Frame struct {
 	Tab     string    `json:"tab"`
 	URL     string    `json:"url"`
@@ -120,7 +120,7 @@ func (s *Session) Stream(ctx context.Context, view View, send func(Frame) error)
 			f.URL, f.Title = info.URL, info.Title
 		}
 		f.Back, f.Forward = history(t)
-		f.Loading = t.loading()
+		f.Loading = t.loading() || t.acting()
 		f.Tabs, _ = s.List()
 		t.state.Lock()
 		f.Agent = time.Since(t.agentAt) < agentShown

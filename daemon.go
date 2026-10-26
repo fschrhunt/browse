@@ -1,7 +1,8 @@
 // The daemon owns the browser session and serves it on a unix socket. A client
 // sends one JSON request per connection and reads one JSON response back.
-// callDaemon starts the daemon in the background when none is listening, and a
-// lock file keeps it to one daemon per user.
+// callDaemon starts the daemon in the background when none is listening, and
+// again when the running one is from before an update. A lock file keeps it to
+// one daemon per profile.
 package main
 
 import (
@@ -49,19 +50,39 @@ type Response struct {
 	Result json.RawMessage `json:"result,omitempty"`
 }
 
+// errUpdated is the daemon's answer once browse has been updated under it.
+var errUpdated = errors.New("browse was updated; the browser is restarting")
+
+// watchExecutable returns a func that reports whether the browse binary this
+// process started from has since been replaced, as installing an update does.
+func watchExecutable() func() bool {
+	exe, err := os.Executable()
+	if err != nil {
+		return func() bool { return false }
+	}
+	first, err := os.Stat(exe)
+	if err != nil {
+		return func() bool { return false }
+	}
+	return func() bool {
+		now, err := os.Stat(exe)
+		return err == nil && (!now.ModTime().Equal(first.ModTime()) || now.Size() != first.Size())
+	}
+}
+
 // errAlreadyRunning means another daemon is serving, so this one is not needed.
 var errAlreadyRunning = errors.New("a browse daemon is already running")
 
-// socketPath is where the daemon listens: $BROWSE_SOCKET, else the user's
-// private runtime directory, else the system temp directory.
+// socketPath is where the daemon listens: $BROWSE_SOCKET, else daemon.sock
+// in the state directory. That directory is the same from every terminal,
+// SSH session and tmux pane, where temp directories are not: macOS gives SSH
+// sessions a different one than the desktop.
 func socketPath() string {
 	if p := os.Getenv("BROWSE_SOCKET"); p != "" {
 		return p
 	}
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return filepath.Join(dir, "browse.sock")
-	}
-	return filepath.Join(os.TempDir(), fmt.Sprintf("browse-%d.sock", os.Getuid()))
+	dir, _ := stateDir()
+	return filepath.Join(dir, "daemon.sock")
 }
 
 // xdgDir returns $env, or ~/fallback when it is unset, joined with "browse".
@@ -136,6 +157,7 @@ func serveDaemon(chromePath, profile string) error {
 	}
 	defer os.Remove(sock)
 
+	updated := watchExecutable()
 	done := make(chan struct{})
 	var stop sync.Once
 	for {
@@ -149,7 +171,7 @@ func serveDaemon(chromePath, profile string) error {
 			}
 		}
 		go func() {
-			if handle(session, conn) {
+			if handle(session, conn, updated) {
 				stop.Do(func() {
 					close(done)
 					ln.Close()
@@ -161,8 +183,10 @@ func serveDaemon(chromePath, profile string) error {
 
 // handle serves one connection and reports whether the daemon should stop.
 // A stream request keeps the connection, writing one frame per line, until the
-// viewer hangs up.
-func handle(s *Session, conn net.Conn) bool {
+// viewer hangs up. Once browse has been updated, every request is answered
+// with errUpdated and the daemon shuts down, so the caller can start the new
+// one.
+func handle(s *Session, conn net.Conn, updated func() bool) bool {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadBytes('\n')
@@ -173,6 +197,11 @@ func handle(s *Session, conn net.Conn) bool {
 	if err := json.Unmarshal(line, &req); err != nil {
 		writeResponse(conn, nil, err)
 		return false
+	}
+	if req.Cmd != "shutdown" && updated() {
+		writeResponse(conn, nil, errUpdated)
+		s.Shutdown()
+		return true
 	}
 	if req.Cmd == "stream" && req.View != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -273,7 +302,8 @@ func dispatch(s *Session, req Request) (any, error) {
 }
 
 // callDaemon sends one request and returns the raw result, starting the daemon
-// first when nothing is listening.
+// first when nothing is listening, and starting it anew when the running one
+// is from before an update.
 func callDaemon(req Request) (json.RawMessage, error) {
 	sock := socketPath()
 	if !daemonListening(sock) {
@@ -283,6 +313,18 @@ func callDaemon(req Request) (json.RawMessage, error) {
 		if err := startDaemon(sock); err != nil {
 			return nil, err
 		}
+	}
+	raw, err := send(sock, req)
+	if err == nil || err.Error() != errUpdated.Error() {
+		return raw, err
+	}
+	// The old daemon is saving the logins and stopping; start the new one after it.
+	fmt.Fprintln(os.Stderr, "browse was updated; restarting the browser, which keeps your logins...")
+	for i := 0; i < 450 && daemonListening(sock); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err := startDaemon(sock); err != nil {
+		return nil, err
 	}
 	return send(sock, req)
 }

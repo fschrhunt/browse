@@ -25,6 +25,9 @@ const (
 	tabPad     = 2  // columns in a tab on each side of its label
 	tabMax     = 22 // the widest a tab's label gets
 	agentSign  = "● agent"
+
+	loadingCycle = 1400                    // milliseconds for the loading band to cross the bar
+	loadingBlue  = "\x1b[38;2;59;130;246m" // the loading band's color
 )
 
 // The bar's buttons, in the order of their image ids after the page's.
@@ -192,12 +195,27 @@ func (v *viewer) bar() string {
 		b.WriteString(row[c])
 	}
 
-	// Notes, such as errors, show under the tabs for a few seconds.
-	fmt.Fprintf(&b, "\x1b[%d;1H%s", barRows, strings.Repeat(" ", v.lay.cols))
-	if v.note != "" && time.Now().Before(v.noteUntil) {
-		note := fit(v.note, v.lay.cols-2)
-		fmt.Fprintf(&b, "\x1b[%d;%dH%s%s%s", barRows, (v.lay.cols-utf8.RuneCountInString(note))/2+1, accent, note, reset)
+	// The bottom row shows notes, such as errors, for a few seconds, and while
+	// the page loads, a blue band sliding along its bottom edge.
+	bottom := make([]string, v.lay.cols+1)
+	for i := range bottom {
+		bottom[i] = " "
 	}
+	if v.frame.Loading {
+		width := max(v.lay.cols/4, 8)
+		phase := float64(time.Now().UnixMilli()%loadingCycle) / loadingCycle
+		first := int(phase*float64(v.lay.cols+width)) - width + 1
+		for c := max(first, 1); c < first+width && c <= v.lay.cols; c++ {
+			bottom[c] = loadingBlue + "▁" + reset
+		}
+	}
+	if v.note != "" && time.Now().Before(v.noteUntil) {
+		note := []rune(fit(v.note, v.lay.cols-2))
+		for i, r := range note {
+			bottom[(v.lay.cols-len(note))/2+1+i] = accent + string(r) + reset
+		}
+	}
+	fmt.Fprintf(&b, "\x1b[%d;1H%s", barRows, strings.Join(bottom[1:], ""))
 
 	var active, under barItem
 	for _, s := range items {

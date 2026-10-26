@@ -274,6 +274,10 @@ func runViewer() error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		return errors.New("the viewer needs a terminal")
 	}
+	// A daemon left from before an update restarts here, before the stream opens.
+	if _, err := callDaemon(Request{Cmd: "ls", Person: true}); err != nil {
+		return err
+	}
 	inTmux := os.Getenv("TMUX") != ""
 	if inTmux {
 		// Let images through to the terminal outside tmux.
@@ -361,6 +365,8 @@ func runViewer() error {
 func (v *viewer) loop(frames <-chan Frame, in <-chan []byte, resized <-chan os.Signal, parser *inputParser) (bool, error) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
+	animate := time.NewTicker(40 * time.Millisecond) // the loading band's frames
+	defer animate.Stop()
 	for {
 		select {
 		case f, ok := <-frames:
@@ -390,6 +396,10 @@ func (v *viewer) loop(frames <-chan Frame, in <-chan []byte, resized <-chan os.S
 			fmt.Print(v.screen())
 		case <-tick.C:
 			fmt.Print(v.screen()) // lets an old note expire
+		case <-animate.C:
+			if v.frame.Loading {
+				fmt.Print(v.screen())
+			}
 		case <-resized:
 			return false, nil
 		}

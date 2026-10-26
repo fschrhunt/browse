@@ -1,17 +1,11 @@
 # browse releases
 
-## v0.2.0 · 2026-10-26
+## Unreleased
 
-- Releases go through Actions: `scripts/release.sh` names the changelog section, then asks
-  Actions to tag. Each release has archives for Linux and macOS with checksums and build
-  provenance, and the install and uninstall scripts.
-- The installer checks the archive against the release's checksums, and takes
-  `--version vX.Y.Z`. It installs with `curl -fsSL https://fschrhunt.com/browse/install.sh | sh`.
-- `browse version` prints the version.
-- Chrome starts on Ubuntu 23.10 and later, whose AppArmor rules block Chrome's sandbox; there
-  it runs without one.
-
-## v0.1.0 · 2026-10-26
-
-- The first release: a browser in the terminal for people and agents, with tabs, an address
-  box, persistent logins, agent commands, and `browse show` for a pane beside the conversation.
+- The first release: a browser in the terminal for people and agents. Tabs sit in the middle of
+  the bar, with back, forward and reload on the left; addresses and searches are typed in one
+  eye-level box; a blue band under the bar shows a page loading. Logins persist, agents drive
+  the same browser with commands, and `browse show` opens it in a pane beside the conversation.
+- Installs with `curl -fsSL https://fschrhunt.com/browse/install.sh | sh` on Linux and macOS,
+  from archives checked against the release's checksums. `browse version` prints the version.
+- Updating restarts the running browser on its own, keeping logins.

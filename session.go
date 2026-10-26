@@ -336,6 +336,14 @@ func dialogError(d *page.EventJavascriptDialogOpening) error {
 	return fmt.Errorf("a %s dialog is open: %q; answer it with browse dialog accept or browse dialog dismiss", d.Type, d.Message)
 }
 
+// acting reports whether an action is running on t, such as a navigation
+// that the site has not answered yet.
+func (t *tab) acting() bool {
+	t.state.Lock()
+	defer t.state.Unlock()
+	return t.interrupt != nil
+}
+
 // pendingDialog returns the open confirm or prompt, if any.
 func (t *tab) pendingDialog() *page.EventJavascriptDialogOpening {
 	t.state.Lock()
