@@ -17,6 +17,9 @@ import (
 	"golang.org/x/term"
 )
 
+// version is the release, such as v0.2.0, set by the release build.
+var version = "dev"
+
 const usage = `usage: browse [url]                 open the browser fullscreen in this terminal
        browse <command> [args] [--tab id] [--json]
 
@@ -60,6 +63,7 @@ Display
   shutdown               stop the browser
   skill [folder]         add the agent skill to every agent found, then ask
                          for other agents' skills folders; or add it to folder
+  version                print browse's version
 
 Actions wait for the page to settle, then print where the browser ended up:
 the tab, its title and URL, and any tab the page opened, alert it showed, or
@@ -416,6 +420,10 @@ func run(argv []string) error {
 	switch args[0] {
 	case "help", "-h", "--help":
 		fmt.Println(usage)
+		return nil
+
+	case "version", "--version":
+		fmt.Println("browse", version)
 		return nil
 
 	case "skill":
